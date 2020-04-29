@@ -20,6 +20,8 @@
             <item type="integer" name="config_captive_portal_dns_probe_timeout"/>
             <item type="string" name="config_captive_portal_http_url"/>
             <item type="string" name="config_captive_portal_https_url"/>
+            <item type="array" name="config_captive_portal_http_urls"/>
+            <item type="array" name="config_captive_portal_https_urls"/>
             <item type="array" name="config_captive_portal_fallback_urls"/>
             <item type="bool" name="config_no_sim_card_uses_neighbor_mcc"/>
             <!-- Configuration value for DhcpResults -->
@@ -34,6 +36,14 @@
             random number and etc.
             -->
             <item type="bool" name="config_dhcp_client_hostname"/>
+            <!-- Customized neighbor unreachable probe parameters.
+            Legal config_*_num value should be in the range of 5-15; and config_*_interval value
+            should be in the range of 750-1000ms.
+            -->
+            <item type="integer" name="config_nud_steadystate_solicit_num"/>
+            <item type="integer" name="config_nud_steadystate_solicit_interval"/>
+            <item type="integer" name="config_nud_postroaming_solicit_num"/>
+            <item type="integer" name="config_nud_postroaming_solicit_interval"/>
         </policy>
     </overlayable>
 </resources>

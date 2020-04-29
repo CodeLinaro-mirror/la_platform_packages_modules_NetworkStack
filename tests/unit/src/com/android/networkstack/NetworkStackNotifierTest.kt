@@ -33,7 +33,6 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
-import android.net.NetworkCapabilities.TRANSPORT_CELLULAR
 import android.net.NetworkCapabilities.TRANSPORT_WIFI
 import android.net.Uri
 import android.os.Handler
@@ -47,8 +46,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.android.dx.mockito.inline.extended.ExtendedMockito.verify
 import com.android.networkstack.NetworkStackNotifier.CHANNEL_CONNECTED
 import com.android.networkstack.NetworkStackNotifier.CHANNEL_VENUE_INFO
+import com.android.networkstack.NetworkStackNotifier.CONNECTED_NOTIFICATION_TIMEOUT_MS
 import com.android.networkstack.NetworkStackNotifier.Dependencies
-import com.android.networkstack.NetworkStackNotifier.MSG_DISMISS_CONNECTED
 import com.android.networkstack.apishim.NetworkInformationShimImpl
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -65,8 +64,6 @@ import org.mockito.Mockito.never
 import org.mockito.MockitoAnnotations
 import kotlin.reflect.KClass
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 @RunWith(AndroidTestingRunner::class)
 @SmallTest
@@ -109,8 +106,8 @@ class NetworkStackNotifierTest {
             .addTransportType(TRANSPORT_WIFI)
             .addCapability(NET_CAPABILITY_VALIDATED)
 
-    private val TEST_CONNECTED_NO_SSID_TITLE = "Connected without SSID"
-    private val TEST_CONNECTED_SSID_TITLE = "Connected to TestSsid"
+    private val TEST_CONNECTED_DESCRIPTION = "Connected"
+    private val TEST_VENUE_DESCRIPTION = "Connected / Tap to view website"
 
     private val TEST_VENUE_INFO_URL = "https://testvenue.example.com/info"
     private val EMPTY_CAPPORT_LP = LinkProperties()
@@ -126,9 +123,8 @@ class NetworkStackNotifierTest {
         MockitoAnnotations.initMocks(this)
         mLooper = TestableLooper.get(this)
         doReturn(mResources).`when`(mContext).resources
-        doReturn(TEST_CONNECTED_NO_SSID_TITLE).`when`(mResources).getString(R.string.connected)
-        doReturn(TEST_CONNECTED_SSID_TITLE).`when`(mResources).getString(
-                R.string.connected_to_ssid_param1, TEST_SSID)
+        doReturn(TEST_CONNECTED_DESCRIPTION).`when`(mResources).getString(R.string.connected)
+        doReturn(TEST_VENUE_DESCRIPTION).`when`(mResources).getString(R.string.tap_for_info)
 
         // applicationInfo is used by Notification.Builder
         val realContext = InstrumentationRegistry.getInstrumentation().context
@@ -176,22 +172,26 @@ class NetworkStackNotifierTest {
         verify(mNm, never()).notify(any(), anyInt(), any())
     }
 
-    private fun verifyConnectedNotification() {
+    private fun verifyConnectedNotification(timeout: Long = CONNECTED_NOTIFICATION_TIMEOUT_MS) {
         verify(mNm).notify(eq(TEST_NETWORK_TAG), mNoteIdCaptor.capture(), mNoteCaptor.capture())
         val note = mNoteCaptor.value
         assertEquals(mPendingIntent, note.contentIntent)
         assertEquals(CHANNEL_CONNECTED, note.channelId)
+        assertEquals(timeout, note.timeoutAfter)
         verify(mDependencies).getActivityPendingIntent(
                 eq(mCurrentUserContext), mIntentCaptor.capture(), eq(FLAG_UPDATE_CURRENT))
     }
 
-    private fun verifyDismissConnectedNotification(noteId: Int) {
-        assertTrue(mHandler.hasMessages(MSG_DISMISS_CONNECTED, TEST_NETWORK))
-        // Execute dismiss message now
-        mHandler.sendMessageAtFrontOfQueue(
-                mHandler.obtainMessage(MSG_DISMISS_CONNECTED, TEST_NETWORK))
-        mLooper.processMessages(1)
-        verify(mNm).cancel(TEST_NETWORK_TAG, noteId)
+    private fun verifyCanceledNotificationAfterNetworkLost() {
+        onLost(TEST_NETWORK)
+        mLooper.processAllMessages()
+        verify(mNm).cancel(TEST_NETWORK_TAG, mNoteIdCaptor.value)
+    }
+
+    private fun verifyCanceledNotificationAfterDefaultNetworkLost() {
+        onDefaultNetworkLost(TEST_NETWORK)
+        mLooper.processAllMessages()
+        verify(mNm).cancel(TEST_NETWORK_TAG, mNoteIdCaptor.value)
     }
 
     @Test
@@ -200,19 +200,15 @@ class NetworkStackNotifierTest {
         mNotifier.notifyCaptivePortalValidationPending(TEST_NETWORK)
         onCapabilitiesChanged(VALIDATED_CAPABILITIES)
         mLooper.processAllMessages()
-
-        verifyConnectedNotification()
-        verify(mResources).getString(R.string.connected)
-        verifyWifiSettingsIntent(mIntentCaptor.value)
-        verifyDismissConnectedNotification(mNoteIdCaptor.value)
+        // There is no notification when SSID is not set.
+        verify(mNm, never()).notify(any(), anyInt(), any())
     }
 
     @Test
     fun testConnectedNotification_WithSsid() {
         // NetworkCapabilities#getSSID is not available for API <= Q
         assumeTrue(NetworkInformationShimImpl.useApiAboveQ())
-        val capabilities = NetworkCapabilities(VALIDATED_CAPABILITIES)
-                .setSSID(TEST_SSID)
+        val capabilities = NetworkCapabilities(VALIDATED_CAPABILITIES).setSSID(TEST_SSID)
 
         onCapabilitiesChanged(EMPTY_CAPABILITIES)
         mNotifier.notifyCaptivePortalValidationPending(TEST_NETWORK)
@@ -220,31 +216,9 @@ class NetworkStackNotifierTest {
         mLooper.processAllMessages()
 
         verifyConnectedNotification()
-        verify(mResources).getString(R.string.connected_to_ssid_param1, TEST_SSID)
+        verify(mResources).getString(R.string.connected)
         verifyWifiSettingsIntent(mIntentCaptor.value)
-        verifyDismissConnectedNotification(mNoteIdCaptor.value)
-    }
-
-    @Test
-    fun testConnectedNotification_WithNonWifiNetwork() {
-        // NetworkCapabilities#getSSID is not available for API <= Q
-        assumeTrue(NetworkInformationShimImpl.useApiAboveQ())
-        val capabilities = NetworkCapabilities()
-                .addTransportType(TRANSPORT_CELLULAR)
-                .addCapability(NET_CAPABILITY_VALIDATED)
-                .setSSID(TEST_SSID)
-
-        onCapabilitiesChanged(EMPTY_CAPABILITIES)
-        mNotifier.notifyCaptivePortalValidationPending(TEST_NETWORK)
-        onCapabilitiesChanged(capabilities)
-        mLooper.processAllMessages()
-
-        verify(mNm).notify(eq(TEST_NETWORK_TAG), mNoteIdCaptor.capture(), mNoteCaptor.capture())
-        val note = mNoteCaptor.value
-        assertNull(note.contentIntent)
-        assertEquals(CHANNEL_CONNECTED, note.channelId)
-        verify(mResources).getString(R.string.connected_to_ssid_param1, TEST_SSID)
-        verifyDismissConnectedNotification(mNoteIdCaptor.value)
+        verifyCanceledNotificationAfterNetworkLost()
     }
 
     @Test
@@ -254,20 +228,15 @@ class NetworkStackNotifierTest {
         mNotifier.notifyCaptivePortalValidationPending(TEST_NETWORK)
         onLinkPropertiesChanged(TEST_CAPPORT_LP)
         onDefaultNetworkAvailable(TEST_NETWORK)
-        onCapabilitiesChanged(VALIDATED_CAPABILITIES)
+        val capabilities = NetworkCapabilities(VALIDATED_CAPABILITIES).setSSID(TEST_SSID)
+        onCapabilitiesChanged(capabilities)
 
         mLooper.processAllMessages()
 
-        verify(mNm).notify(eq(TEST_NETWORK_TAG), mNoteIdCaptor.capture(), mNoteCaptor.capture())
-
-        verifyConnectedNotification()
+        verifyConnectedNotification(timeout = 0)
         verifyVenueInfoIntent(mIntentCaptor.value)
         verify(mResources).getString(R.string.tap_for_info)
-
-        onDefaultNetworkLost(TEST_NETWORK)
-        mLooper.processAllMessages()
-        // Notification only shown on default network
-        verify(mNm).cancel(TEST_NETWORK_TAG, mNoteIdCaptor.value)
+        verifyCanceledNotificationAfterDefaultNetworkLost()
     }
 
     @Test
@@ -278,13 +247,14 @@ class NetworkStackNotifierTest {
         mNotifier.notifyCaptivePortalValidationPending(TEST_NETWORK)
         onLinkPropertiesChanged(TEST_CAPPORT_LP)
         onDefaultNetworkAvailable(TEST_NETWORK)
-        onCapabilitiesChanged(VALIDATED_CAPABILITIES)
+        val capabilities = NetworkCapabilities(VALIDATED_CAPABILITIES).setSSID(TEST_SSID)
+        onCapabilitiesChanged(capabilities)
         mLooper.processAllMessages()
 
         verifyConnectedNotification()
         verifyWifiSettingsIntent(mIntentCaptor.value)
         verify(mResources, never()).getString(R.string.tap_for_info)
-        verifyDismissConnectedNotification(mNoteIdCaptor.value)
+        verifyCanceledNotificationAfterNetworkLost()
     }
 
     @Test
@@ -293,17 +263,15 @@ class NetworkStackNotifierTest {
         assumeTrue(NetworkInformationShimImpl.useApiAboveQ())
         onLinkPropertiesChanged(TEST_CAPPORT_LP)
         onDefaultNetworkAvailable(TEST_NETWORK)
-        onCapabilitiesChanged(VALIDATED_CAPABILITIES)
+        val capabilities = NetworkCapabilities(VALIDATED_CAPABILITIES).setSSID(TEST_SSID)
+        onCapabilitiesChanged(capabilities)
         mLooper.processAllMessages()
 
         verify(mNm).notify(eq(TEST_NETWORK_TAG), mNoteIdCaptor.capture(), mNoteCaptor.capture())
         verify(mDependencies).getActivityPendingIntent(
                 eq(mCurrentUserContext), mIntentCaptor.capture(), eq(FLAG_UPDATE_CURRENT))
         verifyVenueInfoIntent(mIntentCaptor.value)
-
-        onLost(TEST_NETWORK)
-        mLooper.processAllMessages()
-        verify(mNm).cancel(TEST_NETWORK_TAG, mNoteIdCaptor.value)
+        verifyCanceledNotificationAfterDefaultNetworkLost()
     }
 
     @Test

@@ -51,10 +51,10 @@ public interface NetworkInformationShim {
      * @see NetworkCapabilities#getSSID()
      */
     @Nullable
-    String getSSID(@Nullable NetworkCapabilities nc);
+    String getSsid(@Nullable NetworkCapabilities nc);
 
     /**
-     * @see LinkProperties#makeSensitiveFieldsParcelingCopy()
+     * @see LinkProperties#LinkProperties(LinkProperties, boolean)
      */
     @NonNull
     LinkProperties makeSensitiveFieldsParcelingCopy(@NonNull LinkProperties lp);

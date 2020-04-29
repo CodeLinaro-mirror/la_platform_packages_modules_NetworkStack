@@ -73,15 +73,15 @@ public class NetworkInformationShimImpl extends
 
     @Nullable
     @Override
-    public String getSSID(@Nullable NetworkCapabilities nc) {
+    public String getSsid(@Nullable NetworkCapabilities nc) {
         if (nc == null) return null;
-        return nc.getSSID();
+        return nc.getSsid();
     }
 
     @NonNull
     @Override
     public LinkProperties makeSensitiveFieldsParcelingCopy(@NonNull final LinkProperties lp) {
-        return lp.makeSensitiveFieldsParcelingCopy();
+        return new LinkProperties(lp, true);
     }
 
     @Override
