@@ -233,6 +233,9 @@ public class DhcpClient extends StateMachine {
     public static final int CMD_START_PRECONNECTION         = PUBLIC_BASE + 10;
     public static final int CMD_ABORT_PRECONNECTION         = PUBLIC_BASE + 11;
 
+    // Command to rebind the leased IPv4 address on L2 roaming happened.
+    public static final int CMD_REFRESH_LINKADDRESS         = PUBLIC_BASE + 12;
+
     /* Message.arg1 arguments to CMD_POST_DHCP_ACTION notification */
     public static final int DHCP_SUCCESS = 1;
     public static final int DHCP_FAILURE = 2;
@@ -956,7 +959,9 @@ public class DhcpClient extends StateMachine {
                 Log.e(TAG, "Fail to start DHCP Packet Handler");
             }
             notifyFailure();
-            transitionTo(mStoppedState);
+            // We cannot call transitionTo because a transition is still in progress.
+            // Instead, ensure that we process CMD_STOP_DHCP as soon as the transition is complete.
+            deferMessage(obtainMessage(CMD_STOP_DHCP));
         }
 
         @Override
@@ -1674,6 +1679,9 @@ public class DhcpClient extends StateMachine {
                 case CMD_RENEW_DHCP:
                     preDhcpTransitionTo(mWaitBeforeRenewalState, mDhcpRenewingState);
                     return HANDLED;
+                case CMD_REFRESH_LINKADDRESS:
+                    transitionTo(mDhcpRebindingState);
+                    return HANDLED;
                 default:
                     return NOT_HANDLED;
             }
@@ -1717,6 +1725,7 @@ public class DhcpClient extends StateMachine {
                         Log.d(TAG, "Renewed lease not for our current IP address!");
                         notifyFailure();
                         transitionTo(mDhcpInitState);
+                        return;
                     }
                     setDhcpLeaseExpiry(packet);
                     // Updating our notion of DhcpResults here only causes the
