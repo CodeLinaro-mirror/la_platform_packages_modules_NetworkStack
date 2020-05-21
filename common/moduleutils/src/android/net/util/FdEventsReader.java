@@ -24,9 +24,11 @@ import android.os.Looper;
 import android.os.MessageQueue;
 import android.system.ErrnoException;
 import android.system.OsConstants;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
@@ -90,6 +92,12 @@ public abstract class FdEventsReader<BufferType> {
         mHandler = h;
         mQueue = mHandler.getLooper().getQueue();
         mBuffer = buffer;
+    }
+
+    @VisibleForTesting
+    @NonNull
+    protected MessageQueue getMessageQueue() {
+        return mQueue;
     }
 
     /** Start this FdEventsReader. */
@@ -185,7 +193,7 @@ public abstract class FdEventsReader<BufferType> {
 
         if (mFd == null) return false;
 
-        mQueue.addOnFileDescriptorEventListener(
+        getMessageQueue().addOnFileDescriptorEventListener(
                 mFd,
                 FD_EVENTS,
                 (fd, events) -> {
@@ -237,7 +245,7 @@ public abstract class FdEventsReader<BufferType> {
                 handlePacket(mBuffer, bytesRead);
             } catch (Exception e) {
                 logError("handlePacket error: ", e);
-                break;
+                Log.wtf(FdEventsReader.class.getSimpleName(), "Error handling packet", e);
             }
         }
 
@@ -247,7 +255,7 @@ public abstract class FdEventsReader<BufferType> {
     private void unregisterAndDestroyFd() {
         if (mFd == null) return;
 
-        mQueue.removeOnFileDescriptorEventListener(mFd);
+        getMessageQueue().removeOnFileDescriptorEventListener(mFd);
         closeFd(mFd);
         mFd = null;
         onStop();
