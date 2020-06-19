@@ -29,7 +29,7 @@ interface IIpClient {
   oneway void setMulticastFilter(boolean enabled);
   oneway void addKeepalivePacketFilter(int slot, in android.net.TcpKeepalivePacketDataParcelable pkt);
   oneway void removeKeepalivePacketFilter(int slot);
-  oneway void setL2KeyAndGroupHint(in String l2Key, in String groupHint);
+  oneway void setL2KeyAndGroupHint(in String l2Key, in String cluster);
   oneway void addNattKeepalivePacketFilter(int slot, in android.net.NattKeepalivePacketDataParcelable pkt);
   oneway void notifyPreconnectionComplete(boolean success);
   oneway void updateLayer2Information(in android.net.Layer2InformationParcelable info);
