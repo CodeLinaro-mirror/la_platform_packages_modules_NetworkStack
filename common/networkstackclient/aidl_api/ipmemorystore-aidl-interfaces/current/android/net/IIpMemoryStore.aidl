@@ -25,4 +25,6 @@ interface IIpMemoryStore {
   oneway void retrieveNetworkAttributes(String l2Key, android.net.ipmemorystore.IOnNetworkAttributesRetrievedListener listener);
   oneway void retrieveBlob(String l2Key, String clientId, String name, android.net.ipmemorystore.IOnBlobRetrievedListener listener);
   oneway void factoryReset();
+  oneway void delete(String l2Key, boolean needWipe, android.net.ipmemorystore.IOnStatusAndCountListener listener);
+  oneway void deleteCluster(String cluster, boolean needWipe, android.net.ipmemorystore.IOnStatusAndCountListener listener);
 }
