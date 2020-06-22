@@ -37,6 +37,7 @@ import android.util.ArrayMap;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 
 import java.net.Inet4Address;
 import java.util.ArrayList;
@@ -80,6 +81,8 @@ class DhcpLeaseRepository {
     private int mSubnetMask;
     private int mNumAddresses;
     private long mLeaseTimeMs;
+    @Nullable
+    private Inet4Address mClientAddr;
 
     /**
      * Next timestamp when committed or declined leases should be checked for expired ones. This
@@ -128,21 +131,24 @@ class DhcpLeaseRepository {
     private final LinkedHashMap<Inet4Address, Long> mDeclinedAddrs = new LinkedHashMap<>();
 
     DhcpLeaseRepository(@NonNull IpPrefix prefix, @NonNull Set<Inet4Address> reservedAddrs,
-            long leaseTimeMs, @NonNull SharedLog log, @NonNull Clock clock) {
-        updateParams(prefix, reservedAddrs, leaseTimeMs);
+            long leaseTimeMs, @Nullable Inet4Address clientAddr, @NonNull SharedLog log,
+            @NonNull Clock clock) {
         mLog = log;
         mClock = clock;
+        mClientAddr = clientAddr;
+        updateParams(prefix, reservedAddrs, leaseTimeMs, clientAddr);
     }
 
     public void updateParams(@NonNull IpPrefix prefix, @NonNull Set<Inet4Address> reservedAddrs,
-            long leaseTimeMs) {
+            long leaseTimeMs, @Nullable Inet4Address clientAddr) {
         mPrefix = prefix;
         mReservedAddrs = Collections.unmodifiableSet(new HashSet<>(reservedAddrs));
         mPrefixLength = prefix.getPrefixLength();
         mSubnetMask = prefixLengthToV4NetmaskIntHTH(mPrefixLength);
         mSubnetAddr = inet4AddressToIntHTH((Inet4Address) prefix.getAddress()) & mSubnetMask;
-        mNumAddresses = 1 << (IPV4_ADDR_BITS - prefix.getPrefixLength());
+        mNumAddresses = clientAddr != null ? 1 : 1 << (IPV4_ADDR_BITS - prefix.getPrefixLength());
         mLeaseTimeMs = leaseTimeMs;
+        mClientAddr = clientAddr;
 
         cleanMap(mDeclinedAddrs);
         if (cleanMap(mCommittedLeases)) {
@@ -153,7 +159,7 @@ class DhcpLeaseRepository {
     /**
      * From a map keyed by {@link Inet4Address}, remove entries where the key is invalid (as
      * specified by {@link #isValidAddress(Inet4Address)}), or is a reserved address.
-     * @return true iff at least one entry was removed.
+     * @return true if and only if at least one entry was removed.
      */
     private <T> boolean cleanMap(Map<Inet4Address, T> map) {
         final Iterator<Entry<Inet4Address, T>> it = map.entrySet().iterator();
@@ -392,7 +398,8 @@ class DhcpLeaseRepository {
         mEventCallbacks.finishBroadcast();
     }
 
-    public void markLeaseDeclined(@NonNull Inet4Address addr) {
+    @VisibleForTesting
+    void markLeaseDeclined(@NonNull Inet4Address addr) {
         if (mDeclinedAddrs.containsKey(addr) || !isValidAddress(addr)) {
             mLog.logf("Not marking %s as declined: already declined or not assignable",
                     inet4AddrToString(addr));
@@ -402,6 +409,22 @@ class DhcpLeaseRepository {
         mDeclinedAddrs.put(addr, expTime);
         mLog.logf("Marked %s as declined expiring %d", inet4AddrToString(addr), expTime);
         maybeUpdateEarliestExpiration(expTime);
+    }
+
+    /**
+     * Mark a committed lease matching the passed in clientId and hardware address parameters to be
+     * declined, and delete it from the repository.
+     *
+     * @param clientId Client identifier option if specified, or {@link #CLIENTID_UNSPEC}
+     * @param hwAddr client's mac address
+     * @param Addr IPv4 address to be declined
+     * @return true if a lease matching parameters was removed from committed repository.
+     */
+    public boolean markAndReleaseDeclinedLease(@Nullable byte[] clientId,
+            @NonNull MacAddress hwAddr, @NonNull Inet4Address addr) {
+        if (!releaseLease(clientId, hwAddr, addr)) return false;
+        markLeaseDeclined(addr);
+        return true;
     }
 
     /**
@@ -514,6 +537,9 @@ class DhcpLeaseRepository {
      * address (with the ordering in {@link #getAddrIndex(int)}) is returned.
      */
     private int getValidAddress(int addr) {
+        // Only mClientAddr is valid if static client address is enforced.
+        if (mClientAddr != null) return inet4AddressToIntHTH(mClientAddr);
+
         final int lastByteMask = 0xff;
         int addrIndex = getAddrIndex(addr); // 0-based index of the address in the subnet
 

@@ -48,9 +48,9 @@ java_defaults {
 
 java_defaults {
     name: "NetworkStackReleaseApiLevel",
-    sdk_version: "system_29",
+    sdk_version: "system_30",
     min_sdk_version: "29",
-    target_sdk_version: "29",
+    target_sdk_version: "30",
 }
 
 // Filegroups for the API shims
@@ -60,6 +60,7 @@ filegroup {
         "apishim/common/**/*.java",
         "apishim/29/**/*.java",
         "apishim/30/**/*.java",
+        "apishim/31/**/*.java",
         ":networkstack-module-utils-srcs",
     ],
 }
@@ -71,6 +72,7 @@ filegroup {
     srcs: [
         "apishim/common/**/*.java",
         "apishim/29/**/*.java",
+        "apishim/30/**/*.java",
         ":networkstack-module-utils-srcs",
     ],
 }
@@ -85,7 +87,7 @@ java_defaults {
     libs: ["unsupportedappusage"],
     static_libs: [
         "androidx.annotation_annotation",
-        "netd_aidl_interface-unstable-java",
+        "netd_aidl_interface-java",
         "netlink-client",
         "networkstack-client",
         "datastallprotosnano",
@@ -139,6 +141,7 @@ filegroup {
     visibility: [
         "//packages/modules/NetworkStack/tests/unit",
         "//packages/modules/NetworkStack/tests/integration",
+        "//frameworks/base/packages/Tethering/tests/integration",
     ]
 }
 
@@ -202,6 +205,7 @@ android_app {
     manifest: "AndroidManifest.xml",
     // The permission configuration *must* be included to ensure security of the device
     required: ["NetworkPermissionConfig"],
+    updatable: true,
 }
 
 // Android library to derive test APKs for integration tests
@@ -210,7 +214,10 @@ android_library {
     defaults: ["NetworkStackAppDefaults", "NetworkStackReleaseApiLevel"],
     static_libs: ["NetworkStackApiStableLib"],
     manifest: "AndroidManifestBase.xml",
-    visibility: ["//frameworks/base/tests/net/integration"],
+    visibility: [
+        "//frameworks/base/tests/net/integration",
+        "//cts/tests/tests/net",
+    ],
 }
 
 cc_library_shared {
@@ -218,7 +225,8 @@ cc_library_shared {
     srcs: [
         "jni/network_stack_utils_jni.cpp"
     ],
-    sdk_version: "current",
+    sdk_version: "29",
+    min_sdk_version: "29",
     shared_libs: [
         "liblog",
         "libnativehelper_compat_libc++",

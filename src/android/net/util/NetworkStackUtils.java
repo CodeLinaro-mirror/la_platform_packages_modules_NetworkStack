@@ -93,6 +93,37 @@ public class NetworkStackUtils {
     public static final String CAPTIVE_PORTAL_HTTP_URL = "captive_portal_http_url";
 
     /**
+     * A test URL used to override configuration settings and overlays for the network validation
+     * HTTPS URL, when set in {@link android.provider.DeviceConfig} configuration.
+     *
+     * <p>This URL will be ignored if the host is not "localhost" (it can only be used to test with
+     * a local test server), and must not be set in production scenarios (as enforced by CTS tests).
+     *
+     * <p>{@link #TEST_URL_EXPIRATION_TIME} must also be set to use this setting.
+     */
+    public static final String TEST_CAPTIVE_PORTAL_HTTPS_URL = "test_captive_portal_https_url";
+
+    /**
+     * A test URL used to override configuration settings and overlays for the network validation
+     * HTTP URL, when set in {@link android.provider.DeviceConfig} configuration.
+     *
+     * <p>This URL will be ignored if the host is not "localhost" (it can only be used to test with
+     * a local test server), and must not be set in production scenarios (as enforced by CTS tests).
+     *
+     * <p>{@link #TEST_URL_EXPIRATION_TIME} must also be set to use this setting.
+     */
+    public static final String TEST_CAPTIVE_PORTAL_HTTP_URL = "test_captive_portal_http_url";
+
+    /**
+     * Expiration time of the test URL, in ms, relative to {@link System#currentTimeMillis()}.
+     *
+     * <p>After this expiration time, test URLs will be ignored. They will also be ignored if
+     * the expiration time is more than 10 minutes in the future, to avoid misconfiguration
+     * following test runs.
+     */
+    public static final String TEST_URL_EXPIRATION_TIME = "test_url_expiration_time";
+
+    /**
      * The URL used for fallback HTTP captive portal detection when previous HTTP
      * and HTTPS captive portal detection attemps did not return a conclusive answer.
      */
@@ -124,16 +155,30 @@ public class NetworkStackUtils {
     public static final int CAPTIVE_PORTAL_MODE_AVOID = 2;
 
     /**
+     * DNS probe timeout for network validation. Enough for 3 DNS queries 5 seconds apart.
+     */
+    public static final int DEFAULT_CAPTIVE_PORTAL_DNS_PROBE_TIMEOUT = 12500;
+
+    /**
+     * List of fallback probe specs to use for detecting captive portals. This is an alternative to
+     * fallback URLs that provides more flexibility on detection rules. Empty, so unused by default.
+     */
+    public static final String[] DEFAULT_CAPTIVE_PORTAL_FALLBACK_PROBE_SPECS =
+            new String[] {};
+
+    /**
      * The default list of HTTP URLs to use for detecting captive portals.
      */
     public static final String[] DEFAULT_CAPTIVE_PORTAL_HTTP_URLS =
             new String [] {"http://connectivitycheck.gstatic.com/generate_204"};
+
     /**
      * The default list of HTTPS URLs for network validation, to use for confirming internet
      * connectivity.
      */
     public static final String[] DEFAULT_CAPTIVE_PORTAL_HTTPS_URLS =
             new String [] {"https://www.google.com/generate_204"};
+
     /**
      * @deprecated Considering boolean experiment flag is likely to cause misconfiguration
      *             particularly when NetworkStack module rolls back to previous version. It's
@@ -171,6 +216,15 @@ public class NetworkStackUtils {
      */
     public static final String DISMISS_PORTAL_IN_VALIDATED_NETWORK =
             "dismiss_portal_in_validated_network";
+
+    /**
+     * Experiment flag to enable considering DNS probes returning private IP addresses as failed
+     * when attempting to detect captive portals.
+     *
+     * This flag is enabled if !=0 and less than the module APK version.
+     */
+    public static final String DNS_PROBE_PRIVATE_IP_NO_INTERNET_VERSION =
+            "dns_probe_private_ip_no_internet";
 
     static {
         System.loadLibrary("networkstackutilsjni");
@@ -301,9 +355,7 @@ public class NetworkStackUtils {
      */
     public static boolean isFeatureEnabled(@NonNull Context context, @NonNull String namespace,
             @NonNull String name) {
-        final int propertyVersion = getDeviceConfigPropertyInt(namespace, name,
-                0 /* default value */);
-        return isFeatureEnabled(context, namespace, name, false);
+        return isFeatureEnabled(context, namespace, name, false /* defaultEnabled */);
     }
 
     /**
@@ -375,5 +427,13 @@ public class NetworkStackUtils {
         return String.format(
                 (address instanceof Inet6Address) ? "[%s]:%d" : "%s:%d",
                         address.getHostAddress(), port);
+    }
+
+    /**
+     * Return true if the provided address is non-null and an IPv6 Unique Local Address (RFC4193).
+     */
+    public static boolean isIPv6ULA(@Nullable InetAddress addr) {
+        return addr instanceof Inet6Address
+                && ((addr.getAddress()[0] & 0xfe) == 0xfc);
     }
 }

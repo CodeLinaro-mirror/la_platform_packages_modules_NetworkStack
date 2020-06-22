@@ -32,6 +32,7 @@ import android.net.Layer2InformationParcelable;
 import android.net.Layer2PacketParcelable;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
+import android.net.MacAddress;
 import android.net.NattKeepalivePacketDataParcelable;
 import android.net.NetworkStackIpMemoryStore;
 import android.net.ProvisioningConfigurationParcelable;
@@ -63,7 +64,6 @@ import android.text.TextUtils;
 import android.util.LocalLog;
 import android.util.Log;
 import android.util.Pair;
-import android.util.Patterns;
 import android.util.SparseArray;
 
 import androidx.annotation.NonNull;
@@ -73,25 +73,27 @@ import com.android.internal.util.HexDump;
 import com.android.internal.util.IState;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.MessageUtils;
-import com.android.internal.util.Preconditions;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
-import com.android.networkstack.apishim.NetworkInformationShim;
 import com.android.networkstack.apishim.NetworkInformationShimImpl;
-import com.android.networkstack.apishim.ShimUtils;
+import com.android.networkstack.apishim.common.NetworkInformationShim;
+import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.server.NetworkObserverRegistry;
 import com.android.server.NetworkStackService.NetworkStackServiceManager;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.net.InetAddress;
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -380,8 +382,9 @@ public class IpClient extends StateMachine {
     private static final int EVENT_READ_PACKET_FILTER_COMPLETE    = 12;
     private static final int CMD_ADD_KEEPALIVE_PACKET_FILTER_TO_APF = 13;
     private static final int CMD_REMOVE_KEEPALIVE_PACKET_FILTER_FROM_APF = 14;
-    private static final int CMD_UPDATE_L2KEY_GROUPHINT = 15;
-    protected static final int CMD_COMPLETE_PRECONNECTION = 16;
+    private static final int CMD_UPDATE_L2KEY_CLUSTER = 15;
+    private static final int CMD_COMPLETE_PRECONNECTION = 16;
+    private static final int CMD_UPDATE_L2INFORMATION = 17;
 
     // Internal commands to use instead of trying to call transitionTo() inside
     // a given State's enter() method. Calling transitionTo() from enter/exit
@@ -423,6 +426,14 @@ public class IpClient extends StateMachine {
                     new byte[] { (byte) 0x00, (byte) 0x17, (byte) 0xf2, (byte) 0x06 }
     ));
 
+    // Initialize configurable particular SSID set supporting DHCP Roaming feature. See
+    // b/131797393 for more details.
+    private static final Set<String> DHCP_ROAMING_SSID_SET = new HashSet<>(
+            Arrays.asList(
+                    "0001docomo", "ollehWiFi", "olleh GiGa WiFi", "KT WiFi",
+                    "KT GiGA WiFi", "marente"
+    ));
+
     private final State mStoppedState = new StoppedState();
     private final State mStoppingState = new StoppingState();
     private final State mClearingIpAddressesState = new ClearingIpAddressesState();
@@ -447,7 +458,7 @@ public class IpClient extends StateMachine {
     private final SharedLog mLog;
     private final LocalLog mConnectivityPacketLog;
     private final MessageHandlingLogger mMsgStateLogger;
-    private final IpConnectivityLog mMetricsLog = new IpConnectivityLog();
+    private final IpConnectivityLog mMetricsLog;
     private final InterfaceController mInterfaceCtrl;
 
     // Ignore nonzero RDNSS option lifetimes below this value. 0 = disabled.
@@ -467,9 +478,11 @@ public class IpClient extends StateMachine {
     private ProxyInfo mHttpProxy;
     private ApfFilter mApfFilter;
     private String mL2Key; // The L2 key for this network, for writing into the memory store
-    private String mGroupHint; // The group hint for this network, for writing into the memory store
+    private String mCluster; // The cluster for this network, for writing into the memory store
     private boolean mMulticastFiltering;
     private long mStartTimeMillis;
+    private MacAddress mCurrentBssid;
+    private boolean mHasDisabledIPv6OnProvLoss;
 
     /**
      * Reading the snapshot is an asynchronous operation initiated by invoking
@@ -525,6 +538,13 @@ public class IpClient extends StateMachine {
             return NetworkStackUtils.getDeviceConfigPropertyInt(NAMESPACE_CONNECTIVITY, name,
                     defaultValue);
         }
+
+        /**
+         * Get a IpConnectivityLog instance.
+         */
+        public IpConnectivityLog getIpConnectivityLog() {
+            return new IpConnectivityLog();
+        }
     }
 
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
@@ -537,8 +557,8 @@ public class IpClient extends StateMachine {
             NetworkObserverRegistry observerRegistry, NetworkStackServiceManager nssManager,
             Dependencies deps) {
         super(IpClient.class.getSimpleName() + "." + ifName);
-        Preconditions.checkNotNull(ifName);
-        Preconditions.checkNotNull(callback);
+        Objects.requireNonNull(ifName);
+        Objects.requireNonNull(callback);
 
         mTag = getName();
 
@@ -546,6 +566,7 @@ public class IpClient extends StateMachine {
         mInterfaceName = ifName;
         mClatInterfaceName = CLAT_PREFIX + ifName;
         mDependencies = deps;
+        mMetricsLog = deps.getIpConnectivityLog();
         mShutdownLatch = new CountDownLatch(1);
         mCm = mContext.getSystemService(ConnectivityManager.class);
         mObserverRegistry = observerRegistry;
@@ -570,8 +591,10 @@ public class IpClient extends StateMachine {
                 mMinRdnssLifetimeSec);
 
         mLinkObserver = new IpClientLinkObserver(
+                mContext, getHandler(),
                 mInterfaceName,
-                () -> sendMessage(EVENT_NETLINK_LINKPROPERTIES_CHANGED), config) {
+                () -> sendMessage(EVENT_NETLINK_LINKPROPERTIES_CHANGED),
+                config, mLog) {
             @Override
             public void onInterfaceAdded(String iface) {
                 super.onInterfaceAdded(iface);
@@ -665,9 +688,9 @@ public class IpClient extends StateMachine {
             IpClient.this.stop();
         }
         @Override
-        public void setL2KeyAndGroupHint(String l2Key, String groupHint) {
+        public void setL2KeyAndGroupHint(String l2Key, String cluster) {
             enforceNetworkStackCallingPermission();
-            IpClient.this.setL2KeyAndGroupHint(l2Key, groupHint);
+            IpClient.this.setL2KeyAndCluster(l2Key, cluster);
         }
         @Override
         public void setTcpBufferSizes(String tcpBufferSizes) {
@@ -704,7 +727,6 @@ public class IpClient extends StateMachine {
             enforceNetworkStackCallingPermission();
             IpClient.this.notifyPreconnectionComplete(success);
         }
-
         @Override
         public void updateLayer2Information(Layer2InformationParcelable info) {
             enforceNetworkStackCallingPermission();
@@ -772,6 +794,21 @@ public class IpClient extends StateMachine {
             return;
         }
 
+        final ScanResultInfo scanResultInfo = req.mScanResultInfo;
+        mCurrentBssid = null;
+        if (scanResultInfo != null) {
+            try {
+                mCurrentBssid = MacAddress.fromString(scanResultInfo.getBssid());
+            } catch (IllegalArgumentException e) {
+                Log.wtf(mTag, "Invalid BSSID: " + scanResultInfo.getBssid()
+                        + " in provisioning configuration", e);
+            }
+        }
+
+        if (req.mLayer2Info != null) {
+            mL2Key = req.mLayer2Info.mL2Key;
+            mCluster = req.mLayer2Info.mCluster;
+        }
         sendMessage(CMD_START, new android.net.shared.ProvisioningConfiguration(req));
     }
 
@@ -818,10 +855,15 @@ public class IpClient extends StateMachine {
     }
 
     /**
-     * Set the L2 key and group hint for storing info into the memory store.
+     * Set the L2 key and cluster for storing info into the memory store.
+     *
+     * This method is only supported on Q devices. For R or above releases,
+     * caller should call #updateLayer2Information() instead.
      */
-    public void setL2KeyAndGroupHint(String l2Key, String groupHint) {
-        sendMessage(CMD_UPDATE_L2KEY_GROUPHINT, new Pair<>(l2Key, groupHint));
+    public void setL2KeyAndCluster(String l2Key, String cluster) {
+        if (!ShimUtils.isReleaseOrDevelopmentApiAbove(Build.VERSION_CODES.Q)) {
+            sendMessage(CMD_UPDATE_L2KEY_CLUSTER, new Pair<>(l2Key, cluster));
+        }
     }
 
     /**
@@ -877,10 +919,10 @@ public class IpClient extends StateMachine {
     }
 
     /**
-     * Update the network bssid, L2Key and GroupHint layer2 information.
+     * Update the network bssid, L2Key and cluster on L2 roaming happened.
      */
     public void updateLayer2Information(@NonNull Layer2InformationParcelable info) {
-        // TODO: add specific implementation.
+        sendMessage(CMD_UPDATE_L2INFORMATION, info);
     }
 
     /**
@@ -1096,9 +1138,9 @@ public class IpClient extends StateMachine {
         // Note that we can still be disconnected by IpReachabilityMonitor
         // if the IPv6 default gateway (but not the IPv6 DNS servers; see
         // accompanying code in IpReachabilityMonitor) is unreachable.
-        final boolean ignoreIPv6ProvisioningLoss =
-                mConfiguration != null && mConfiguration.mUsingMultinetworkPolicyTracker
-                && !mCm.shouldAvoidBadWifi();
+        final boolean ignoreIPv6ProvisioningLoss = mHasDisabledIPv6OnProvLoss
+                || (mConfiguration != null && mConfiguration.mUsingMultinetworkPolicyTracker
+                        && !mCm.shouldAvoidBadWifi());
 
         // Additionally:
         //
@@ -1122,7 +1164,23 @@ public class IpClient extends StateMachine {
         // IPv6 default route then also consider the loss of that default route
         // to be a loss of provisioning. See b/27962810.
         if (oldLp.hasGlobalIpv6Address() && (lostIPv6Router && !ignoreIPv6ProvisioningLoss)) {
-            delta = PROV_CHANGE_LOST_PROVISIONING;
+            // Although link properties have lost IPv6 default route in this case, if IPv4 is still
+            // working with appropriate routes and DNS servers, we can keep the current connection
+            // without disconnecting from the network, just disable IPv6 on that given network until
+            // to the next provisioning. Disabling IPv6 will result in all IPv6 connectivity torn
+            // down and all IPv6 sockets being closed, the non-routable IPv6 DNS servers will be
+            // stripped out, so applications will be able to reconnect immediately over IPv4. See
+            // b/131781810.
+            if (newLp.isIpv4Provisioned()) {
+                mInterfaceCtrl.disableIPv6();
+                mHasDisabledIPv6OnProvLoss = true;
+                delta = PROV_CHANGE_STILL_PROVISIONED;
+                if (DBG) {
+                    mLog.log("Disable IPv6 stack completely when the default router has gone");
+                }
+            } else {
+                delta = PROV_CHANGE_LOST_PROVISIONING;
+            }
         }
 
         return delta;
@@ -1199,6 +1257,7 @@ public class IpClient extends StateMachine {
             newLp.addRoute(route);
         }
         addAllReachableDnsServers(newLp, netlinkLinkProperties.getDnsServers());
+        newLp.setNat64Prefix(netlinkLinkProperties.getNat64Prefix());
 
         // [3] Add in data from DHCPv4, if available.
         //
@@ -1222,9 +1281,9 @@ public class IpClient extends StateMachine {
             }
 
             final String capportUrl = mDhcpResults.captivePortalApiUrl;
-            // Uri.parse does no syntax check; do a simple regex check to eliminate garbage.
+            // Uri.parse does no syntax check; do a simple check to eliminate garbage.
             // If the URL is still incorrect data fetching will fail later, which is fine.
-            if (capportUrl != null && Patterns.WEB_URL.matcher(capportUrl).matches()) {
+            if (isParseableUrl(capportUrl)) {
                 NetworkInformationShimImpl.newInstance()
                         .setCaptivePortalApiUrl(newLp, Uri.parse(capportUrl));
             }
@@ -1260,6 +1319,19 @@ public class IpClient extends StateMachine {
         // TODO: also learn via netlink routes specified by an InitialConfiguration and specified
         // from a static IP v4 config instead of manually patching them in in steps [3] and [5].
         return newLp;
+    }
+
+    private static boolean isParseableUrl(String url) {
+        // Verify that a URL has a reasonable format that can be parsed as per the URL constructor.
+        // This does not use Patterns.WEB_URL as that pattern excludes URLs without TLDs, such as on
+        // localhost.
+        if (url == null) return false;
+        try {
+            new URL(url);
+            return true;
+        } catch (MalformedURLException e) {
+            return false;
+        }
     }
 
     private static void addAllReachableDnsServers(
@@ -1502,11 +1574,43 @@ public class IpClient extends StateMachine {
         }
     }
 
+    private void handleUpdateL2Information(@NonNull Layer2InformationParcelable info) {
+        mL2Key = info.l2Key;
+        mCluster = info.cluster;
+
+        if (info.bssid == null || mCurrentBssid == null) {
+            Log.wtf(mTag, "bssid in the parcelable or current tracked bssid should be non-null");
+            return;
+        }
+
+        // If the BSSID has not changed, there is nothing to do.
+        if (info.bssid.equals(mCurrentBssid)) return;
+
+        if (mIpReachabilityMonitor != null) {
+            mIpReachabilityMonitor.probeAll();
+        }
+
+        // Check whether to refresh previous IP lease on L2 roaming happened.
+        final String ssid = removeDoubleQuotes(mConfiguration.mDisplayName);
+        if (DHCP_ROAMING_SSID_SET.contains(ssid) && mDhcpClient != null) {
+            if (DBG) {
+                Log.d(mTag, "L2 roaming happened from " + mCurrentBssid
+                        + " to " + info.bssid
+                        + " , SSID: " + ssid
+                        + " , starting refresh leased IP address");
+            }
+            mDhcpClient.sendMessage(DhcpClient.CMD_REFRESH_LINKADDRESS);
+        }
+        mCurrentBssid = info.bssid;
+    }
+
     class StoppedState extends State {
         @Override
         public void enter() {
             stopAllIP();
+            mHasDisabledIPv6OnProvLoss = false;
 
+            mLinkObserver.clearInterfaceParams();
             resetLinkProperties();
             if (mStartTimeMillis > 0) {
                 // Completed a life-cycle; send a final empty LinkProperties
@@ -1547,10 +1651,10 @@ public class IpClient extends StateMachine {
                     handleLinkPropertiesUpdate(NO_CALLBACKS);
                     break;
 
-                case CMD_UPDATE_L2KEY_GROUPHINT: {
+                case CMD_UPDATE_L2KEY_CLUSTER: {
                     final Pair<String, String> args = (Pair<String, String>) msg.obj;
                     mL2Key = args.first;
-                    mGroupHint = args.second;
+                    mCluster = args.second;
                     break;
                 }
 
@@ -1634,6 +1738,18 @@ public class IpClient extends StateMachine {
     class ClearingIpAddressesState extends State {
         @Override
         public void enter() {
+            // Ensure that interface parameters are fetched on the handler thread so they are
+            // properly ordered with other events, such as restoring the interface MTU on teardown.
+            mInterfaceParams = mDependencies.getInterfaceParams(mInterfaceName);
+            if (mInterfaceParams == null) {
+                logError("Failed to find InterfaceParams for " + mInterfaceName);
+                doImmediateProvisioningFailure(IpManagerEvent.ERROR_INTERFACE_NOT_FOUND);
+                deferMessage(obtainMessage(CMD_STOP));
+                return;
+            }
+
+            mLinkObserver.setInterfaceParams(mInterfaceParams);
+
             if (readyToProceed()) {
                 deferMessage(obtainMessage(CMD_ADDRESSES_CLEARED));
             } else {
@@ -1643,15 +1759,6 @@ public class IpClient extends StateMachine {
                 stopAllIP();
             }
 
-            // Ensure that interface parameters are fetched on the handler thread so they are
-            // properly ordered with other events, such as restoring the interface MTU on teardown.
-            mInterfaceParams = mDependencies.getInterfaceParams(mInterfaceName);
-            if (mInterfaceParams == null) {
-                logError("Failed to find InterfaceParams for " + mInterfaceName);
-                doImmediateProvisioningFailure(IpManagerEvent.ERROR_INTERFACE_NOT_FOUND);
-                transitionTo(mStoppedState);
-                return;
-            }
             mCallback.setNeighborDiscoveryOffload(true);
         }
 
@@ -1686,7 +1793,7 @@ public class IpClient extends StateMachine {
         }
 
         private boolean readyToProceed() {
-            return (!mLinkProperties.hasIpv4Address() && !mLinkProperties.hasGlobalIpv6Address());
+            return !mLinkProperties.hasIpv4Address() && !mLinkProperties.hasGlobalIpv6Address();
         }
     }
 
@@ -1749,10 +1856,10 @@ public class IpClient extends StateMachine {
                     transitionTo(mStoppingState);
                     break;
 
-                case CMD_UPDATE_L2KEY_GROUPHINT: {
+                case CMD_UPDATE_L2KEY_CLUSTER: {
                     final Pair<String, String> args = (Pair<String, String>) msg.obj;
                     mL2Key = args.first;
-                    mGroupHint = args.second;
+                    mCluster = args.second;
                     // TODO : attributes should be saved to the memory store with
                     // these new values if they differ from the previous ones.
                     // If the state machine is in pure StartedState, then the values to input
@@ -1762,6 +1869,10 @@ public class IpClient extends StateMachine {
                     // inputting current values for what may be a different L3 network.
                     break;
                 }
+
+                case CMD_UPDATE_L2INFORMATION:
+                    handleUpdateL2Information((Layer2InformationParcelable) msg.obj);
+                    break;
 
                 case EVENT_PROVISIONING_TIMEOUT:
                     handleProvisioningFailure();
