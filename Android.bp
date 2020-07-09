@@ -87,11 +87,13 @@ java_defaults {
     libs: ["unsupportedappusage"],
     static_libs: [
         "androidx.annotation_annotation",
-        "netd_aidl_interface-V3-java",
+        "netd_aidl_interface-java",
         "netlink-client",
         "networkstack-client",
+        "net-utils-framework-common",
+        // See note on statsprotos when adding/updating proto build rules
         "datastallprotosnano",
-        "networkstackprotosnano",
+        "statsprotos",
         "captiveportal-lib",
     ],
     plugins: ["java_api_finder"],
@@ -290,4 +292,20 @@ android_app {
     manifest: ":NetworkStackTestAndroidManifest",
     // The permission configuration *must* be included to ensure security of the device
     required: ["NetworkPermissionConfig"],
+}
+
+// When adding or modifying protos, the jarjar rules and possibly proguard rules need
+// to be updated: proto libraries may pull additional static libraries.
+java_library_static {
+    name: "statsprotos",
+    proto: {
+        type: "lite",
+    },
+    srcs: [
+        "src/com/android/networkstack/metrics/stats.proto",
+    ],
+    static_libs: [
+        "networkstackprotos",
+    ],
+    defaults: ["NetworkStackReleaseApiLevel"],
 }
