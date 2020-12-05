@@ -16,6 +16,7 @@
 // later when a module using the interface is updated, e.g., Mainline modules.
 
 package android.net;
+@JavaDerive(toString=true)
 parcelable DataStallReportParcelable {
   long timestampMillis = 0;
   int detectionMethod = 1;

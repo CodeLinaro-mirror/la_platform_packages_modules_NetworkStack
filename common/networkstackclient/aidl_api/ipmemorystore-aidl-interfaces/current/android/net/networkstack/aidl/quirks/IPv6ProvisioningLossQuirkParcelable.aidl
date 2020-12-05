@@ -16,6 +16,7 @@
 // later when a module using the interface is updated, e.g., Mainline modules.
 
 package android.net.networkstack.aidl.quirks;
+@JavaDerive(toString=true)
 parcelable IPv6ProvisioningLossQuirkParcelable {
   int detectionCount;
   long quirkExpiry;

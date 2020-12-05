@@ -17,6 +17,7 @@
 
 package android.net.ipmemorystore;
 /* @hide */
+@JavaDerive(toString=true)
 parcelable NetworkAttributesParcelable {
   byte[] assignedV4Address;
   long assignedV4AddressExpiry;
