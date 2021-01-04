@@ -27,11 +27,11 @@ import static android.system.OsConstants.IPPROTO_TCP;
 import static android.system.OsConstants.IPPROTO_UDP;
 import static android.system.OsConstants.SOCK_RAW;
 
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ECHO_REQUEST_TYPE;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_NEIGHBOR_ADVERTISEMENT;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
-import static com.android.server.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
-import static com.android.server.util.NetworkStackConstants.IPV6_ADDR_LEN;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ECHO_REQUEST_TYPE;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_NEIGHBOR_ADVERTISEMENT;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_ADVERTISEMENT;
+import static com.android.net.module.util.NetworkStackConstants.ICMPV6_ROUTER_SOLICITATION;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_LEN;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -778,7 +778,7 @@ public class ApfFilter {
             mPacket = ByteBuffer.wrap(Arrays.copyOf(packet, length));
             mLastSeen = currentTimeSeconds();
 
-            // Sanity check packet in case a packet arrives before we attach RA filter
+            // Check packet in case a packet arrives before we attach RA filter
             // to our packet socket. b/29586253
             if (getUint16(mPacket, ETH_ETHERTYPE_OFFSET) != ETH_P_IPV6 ||
                     getUint8(mPacket, IPV6_NEXT_HEADER_OFFSET) != IPPROTO_ICMPV6 ||

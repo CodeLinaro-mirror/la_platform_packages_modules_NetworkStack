@@ -87,7 +87,7 @@ java_defaults {
     libs: ["unsupportedappusage"],
     static_libs: [
         "androidx.annotation_annotation",
-        "netd_aidl_interface-unstable-java",
+        "netd_aidl_interface-java",
         "netlink-client",
         "networkstack-client",
         "net-utils-framework-common",
@@ -95,6 +95,7 @@ java_defaults {
         "datastallprotosnano",
         "statsprotos",
         "captiveportal-lib",
+        "net-utils-device-common",
     ],
     plugins: ["java_api_finder"],
 }
@@ -144,6 +145,7 @@ filegroup {
         "//packages/modules/NetworkStack/tests/unit",
         "//packages/modules/NetworkStack/tests/integration",
         "//frameworks/base/packages/Tethering/tests/integration",
+        "//packages/modules/Connectivity/Tethering/tests/integration",
     ]
 }
 
@@ -219,6 +221,7 @@ android_library {
     visibility: [
         "//frameworks/base/tests/net/integration",
         "//cts/tests/tests/net",
+        "//packages/modules/Connectivity/tests/cts/net",
     ],
 }
 
