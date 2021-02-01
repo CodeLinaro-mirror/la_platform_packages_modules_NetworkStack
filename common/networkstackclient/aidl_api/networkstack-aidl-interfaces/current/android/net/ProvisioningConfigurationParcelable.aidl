@@ -16,6 +16,7 @@
 // later when a module using the interface is updated, e.g., Mainline modules.
 
 package android.net;
+@JavaDerive(toString=true)
 parcelable ProvisioningConfigurationParcelable {
   boolean enableIPv4;
   boolean enableIPv6;
