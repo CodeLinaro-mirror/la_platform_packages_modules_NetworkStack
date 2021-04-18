@@ -15,6 +15,10 @@
 //
 
 // AIDL interfaces between the core system and the networking mainline module.
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
 aidl_interface {
     name: "ipmemorystore-aidl-interfaces",
     local_include_dir: "src",
@@ -156,10 +160,10 @@ java_library {
         "networkstack-aidl-interfaces-V10-java",
     ],
     visibility: [
-        "//frameworks/base/packages/Tethering",
+        "//frameworks/base/packages/Connectivity/service",
         "//packages/modules/Connectivity/Tethering",
+        "//packages/modules/Connectivity/service",
         "//frameworks/base/services/net",
-        "//frameworks/opt/net/wifi/service",
         "//packages/modules/NetworkStack",
     ],
     apex_available: [
