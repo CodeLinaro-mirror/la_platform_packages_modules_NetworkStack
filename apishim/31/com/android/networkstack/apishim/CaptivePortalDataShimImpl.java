@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim.api31;
+package com.android.networkstack.apishim;
 
 import android.net.CaptivePortalData;
 import android.net.Uri;

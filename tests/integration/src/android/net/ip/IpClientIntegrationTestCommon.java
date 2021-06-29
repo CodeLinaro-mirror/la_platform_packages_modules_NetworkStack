@@ -128,7 +128,6 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
-import android.stats.connectivity.NetworkQuirkEvent;
 import android.system.ErrnoException;
 import android.system.Os;
 
@@ -148,7 +147,6 @@ import com.android.networkstack.apishim.ConstantsShim;
 import com.android.networkstack.apishim.common.ShimUtils;
 import com.android.networkstack.arp.ArpPacket;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
-import com.android.networkstack.metrics.NetworkQuirkMetrics;
 import com.android.networkstack.packets.NeighborAdvertisement;
 import com.android.server.NetworkObserver;
 import com.android.server.NetworkObserverRegistry;
@@ -262,7 +260,6 @@ public abstract class IpClientIntegrationTestCommon {
     @Mock private IpMemoryStoreService mIpMemoryStoreService;
     @Mock private PowerManager.WakeLock mTimeoutWakeLock;
     @Mock protected NetworkStackIpMemoryStore mIpMemoryStore;
-    @Mock private NetworkQuirkMetrics.Dependencies mNetworkQuirkMetricsDeps;
 
     @Spy private INetd mNetd;
     private NetworkObserverRegistry mNetworkObserverRegistry;
@@ -450,11 +447,6 @@ public abstract class IpClientIntegrationTestCommon {
 
         public void setDeviceConfigProperty(String name, int value) {
             mIntConfigProperties.put(name, value);
-        }
-
-        @Override
-        public NetworkQuirkMetrics getNetworkQuirkMetrics() {
-            return new NetworkQuirkMetrics(mNetworkQuirkMetricsDeps);
         }
     }
 
@@ -782,14 +774,11 @@ public abstract class IpClientIntegrationTestCommon {
     private void startIpClientProvisioning(final boolean isDhcpLeaseCacheEnabled,
             final boolean shouldReplyRapidCommitAck, final boolean isPreconnectionEnabled,
             final boolean isDhcpIpConflictDetectEnabled, final boolean isIPv6OnlyPreferredEnabled,
-            final String displayName, final ScanResultInfo scanResultInfo,
-            final Layer2Information layer2Info) throws Exception {
+            final String displayName, final ScanResultInfo scanResultInfo) throws Exception {
         ProvisioningConfiguration.Builder prov = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
-                .withLayer2Information(layer2Info == null
-                        ? new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                              MacAddress.fromString(TEST_DEFAULT_BSSID))
-                        : layer2Info)
+                .withLayer2Information(new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
+                        MacAddress.fromString(TEST_DEFAULT_BSSID)))
                 .withoutIPv6();
         if (isPreconnectionEnabled) prov.withPreconnection();
         if (displayName != null) prov.withDisplayName(displayName);
@@ -811,7 +800,7 @@ public abstract class IpClientIntegrationTestCommon {
             throws Exception {
         startIpClientProvisioning(isDhcpLeaseCacheEnabled, isDhcpRapidCommitEnabled,
                 isPreconnectionEnabled, isDhcpIpConflictDetectEnabled, isIPv6OnlyPreferredEnabled,
-                null /* displayName */, null /* ScanResultInfo */, null /* layer2Info */);
+                null /* displayName */, null /* ScanResultInfo */);
     }
 
     private void assertIpMemoryStoreNetworkAttributes(final Integer leaseTimeSec,
@@ -866,11 +855,10 @@ public abstract class IpClientIntegrationTestCommon {
             final boolean isDhcpIpConflictDetectEnabled,
             final boolean isIPv6OnlyPreferredEnabled,
             final String captivePortalApiUrl, final String displayName,
-            final ScanResultInfo scanResultInfo, final Layer2Information layer2Info)
-            throws Exception {
+            final ScanResultInfo scanResultInfo) throws Exception {
         startIpClientProvisioning(isDhcpLeaseCacheEnabled, shouldReplyRapidCommitAck,
                 false /* isPreconnectionEnabled */, isDhcpIpConflictDetectEnabled,
-                isIPv6OnlyPreferredEnabled, displayName, scanResultInfo, layer2Info);
+                isIPv6OnlyPreferredEnabled, displayName, scanResultInfo);
         return handleDhcpPackets(isSuccessLease, leaseTimeSec, shouldReplyRapidCommitAck, mtu,
                 captivePortalApiUrl);
     }
@@ -916,8 +904,7 @@ public abstract class IpClientIntegrationTestCommon {
         return performDhcpHandshake(isSuccessLease, leaseTimeSec, isDhcpLeaseCacheEnabled,
                 isDhcpRapidCommitEnabled, mtu, isDhcpIpConflictDetectEnabled,
                 false /* isIPv6OnlyPreferredEnabled */,
-                null /* captivePortalApiUrl */, null /* displayName */, null /* scanResultInfo */,
-                null /* layer2Info */);
+                null /* captivePortalApiUrl */, null /* displayName */, null /* scanResultInfo */);
     }
 
     private List<DhcpPacket> performDhcpHandshake() throws Exception {
@@ -926,21 +913,10 @@ public abstract class IpClientIntegrationTestCommon {
                 TEST_DEFAULT_MTU, false /* isDhcpIpConflictDetectEnabled */);
     }
 
-    private DhcpPacket getNextDhcpPacket(final long timeout) throws Exception {
-        byte[] packet;
-        while ((packet = mDhcpPacketReadHead.getValue()
-                .poll(timeout, this::isDhcpPacket)) != null) {
-            final DhcpPacket dhcpPacket = DhcpPacket.decodeFullPacket(packet, packet.length,
-                    ENCAP_L2);
-            if (dhcpPacket != null) return dhcpPacket;
-        }
-        return null;
-    }
-
-    private DhcpPacket getNextDhcpPacket() throws Exception {
-        final DhcpPacket packet = getNextDhcpPacket(PACKET_TIMEOUT_MS);
+    private DhcpPacket getNextDhcpPacket() throws ParseException {
+        byte[] packet = mDhcpPacketReadHead.getValue().poll(PACKET_TIMEOUT_MS, this::isDhcpPacket);
         assertNotNull("No expected DHCP packet received on interface within timeout", packet);
-        return packet;
+        return DhcpPacket.decodeFullPacket(packet, packet.length, ENCAP_L2);
     }
 
     private DhcpPacket getReplyFromDhcpLease(final NetworkAttributes na, boolean timeout)
@@ -2064,8 +2040,9 @@ public abstract class IpClientIntegrationTestCommon {
         final List<DhcpPacket> sentPackets = performDhcpHandshake(true /* isSuccessLease */,
                 TEST_LEASE_DURATION_S, true /* isDhcpLeaseCacheEnabled */,
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
-                false /* isDhcpIpConflictDetectEnabled */);
-
+                false /* isDhcpIpConflictDetectEnabled */,
+                false /* isIPv6OnlyPreferredEnabled */,
+                null /* captivePortalApiUrl */, null /* displayName */, null /* scanResultInfo */);
         assertEquals(2, sentPackets.size());
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
         assertHostname(true, TEST_HOST_NAME, TEST_HOST_NAME_TRANSLITERATION, sentPackets);
@@ -2081,8 +2058,9 @@ public abstract class IpClientIntegrationTestCommon {
         final List<DhcpPacket> sentPackets = performDhcpHandshake(true /* isSuccessLease */,
                 TEST_LEASE_DURATION_S, true /* isDhcpLeaseCacheEnabled */,
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
-                false /* isDhcpIpConflictDetectEnabled */);
-
+                false /* isDhcpIpConflictDetectEnabled */,
+                false /* isIPv6OnlyPreferredEnabled */,
+                null /* captivePortalApiUrl */, null /* displayName */, null /* scanResultInfo */);
         assertEquals(2, sentPackets.size());
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
         assertHostname(false, TEST_HOST_NAME, TEST_HOST_NAME_TRANSLITERATION, sentPackets);
@@ -2098,8 +2076,9 @@ public abstract class IpClientIntegrationTestCommon {
         final List<DhcpPacket> sentPackets = performDhcpHandshake(true /* isSuccessLease */,
                 TEST_LEASE_DURATION_S, true /* isDhcpLeaseCacheEnabled */,
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
-                false /* isDhcpIpConflictDetectEnabled */);
-
+                false /* isDhcpIpConflictDetectEnabled */,
+                false /* isIPv6OnlyPreferredEnabled */,
+                null /* captivePortalApiUrl */, null /* displayName */, null /* scanResultInfo */);
         assertEquals(2, sentPackets.size());
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
         assertHostname(true, null /* hostname */, null /* hostnameAfterTransliteration */,
@@ -2196,8 +2175,7 @@ public abstract class IpClientIntegrationTestCommon {
                 false /* isDhcpRapidCommitEnabled */, TEST_DEFAULT_MTU,
                 false /* isDhcpIpConflictDetectEnabled */,
                 false /* isIPv6OnlyPreferredEnabled */,
-                null /* captivePortalApiUrl */, displayName, info /* scanResultInfo */,
-                null /* layer2Info */);
+                null /* captivePortalApiUrl */, displayName, info /* scanResultInfo */);
         assertEquals(2, sentPackets.size());
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
 
@@ -2284,9 +2262,10 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void doDhcpRoamingTest(final boolean hasMismatchedIpAddress, final String displayName,
-            final MacAddress bssid, final boolean expectRoaming) throws Exception {
+            final String ssid, final String bssid, final boolean expectRoaming) throws Exception {
         long currentTime = System.currentTimeMillis();
-        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER, bssid);
+        final ScanResultInfo scanResultInfo = (ssid == null || bssid == null)
+                ? null : makeScanResultInfo(ssid, bssid);
 
         doAnswer(invocation -> {
             // we don't rely on the Init-Reboot state to renew previous cached IP lease.
@@ -2303,8 +2282,7 @@ public abstract class IpClientIntegrationTestCommon {
                 true /* isDhcpLeaseCacheEnabled */, false /* isDhcpRapidCommitEnabled */,
                 TEST_DEFAULT_MTU, false /* isDhcpIpConflictDetectEnabled */,
                 false /* isIPv6OnlyPreferredEnabled */,
-                null /* captivePortalApiUrl */, displayName, null /* scanResultInfo */,
-                layer2Info);
+                null /* captivePortalApiUrl */, displayName, scanResultInfo);
         verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_DEFAULT_MTU);
 
@@ -2350,31 +2328,37 @@ public abstract class IpClientIntegrationTestCommon {
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */);
+                TEST_DHCP_ROAM_SSID, TEST_DEFAULT_BSSID, true /* expectRoaming */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_invalidBssid() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                MacAddress.fromString(TEST_DHCP_ROAM_BSSID), false /* expectRoaming */);
+                TEST_DHCP_ROAM_SSID, TEST_DHCP_ROAM_BSSID, false /* expectRoaming */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
-    public void testDhcpRoaming_nullBssid() throws Exception {
+    public void testDhcpRoaming_nullScanResultInfo() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                null /* BSSID */, false /* expectRoaming */);
+                null /* SSID */, null /* BSSID */, false /* expectRoaming */);
+    }
+
+    @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
+    public void testDhcpRoaming_invalidSsid() throws Exception {
+        doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
+                TEST_DEFAULT_SSID, TEST_DEFAULT_BSSID, false /* expectRoaming */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_invalidDisplayName() throws Exception {
         doDhcpRoamingTest(false /* hasMismatchedIpAddress */, "\"test-ssid\"" /* display name */,
-                MacAddress.fromString(TEST_DEFAULT_BSSID), false /* expectRoaming */);
+                TEST_DHCP_ROAM_SSID, TEST_DEFAULT_BSSID, false /* expectRoaming */);
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDhcpRoaming_mismatchedLeasedIpAddress() throws Exception {
         doDhcpRoamingTest(true /* hasMismatchedIpAddress */, "\"0001docomo\"" /* display name */,
-                MacAddress.fromString(TEST_DEFAULT_BSSID), true /* expectRoaming */);
+                TEST_DHCP_ROAM_SSID, TEST_DEFAULT_BSSID, true /* expectRoaming */);
     }
 
     private void performDualStackProvisioning() throws Exception {
@@ -2404,15 +2388,12 @@ public abstract class IpClientIntegrationTestCommon {
         reset(mCb);
     }
 
-    private void doDualStackProvisioning(boolean shouldDisableAcceptRa) throws Exception {
+    private void doDualStackProvisioning() throws Exception {
         when(mCm.shouldAvoidBadWifi()).thenReturn(true);
 
         final ProvisioningConfiguration config = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
                 .build();
-
-        setFeatureEnabled(NetworkStackUtils.IPCLIENT_DISABLE_ACCEPT_RA_VERSION,
-                shouldDisableAcceptRa);
         // Enable rapid commit to accelerate DHCP handshake to shorten test duration,
         // not strictly necessary.
         setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* isRapidCommitEnabled */,
@@ -2422,9 +2403,9 @@ public abstract class IpClientIntegrationTestCommon {
         performDualStackProvisioning();
     }
 
-    @Test @SignatureRequiredTest(reason = "signature perms are required due to mocked callabck")
-    public void testIgnoreIpv6ProvisioningLoss_disableIPv6Stack() throws Exception {
-        doDualStackProvisioning(false /* shouldDisableAcceptRa */);
+    @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
+    public void testIgnoreIpv6ProvisioningLoss() throws Exception {
+        doDualStackProvisioning();
 
         final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
 
@@ -2446,52 +2427,11 @@ public abstract class IpClientIntegrationTestCommon {
         assertNotNull(lp);
         assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
         assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
-
-        final ArgumentCaptor<Integer> quirkEvent = ArgumentCaptor.forClass(Integer.class);
-        verify(mNetworkQuirkMetricsDeps, timeout(TEST_TIMEOUT_MS)).writeStats(quirkEvent.capture());
-        assertEquals((long) quirkEvent.getValue(),
-                (long) NetworkQuirkEvent.QE_IPV6_PROVISIONING_ROUTER_LOST.ordinal());
-    }
-
-    @Test @SignatureRequiredTest(reason = "signature perms are required due to mocked callabck")
-    public void testIgnoreIpv6ProvisioningLoss_disableAcceptRa() throws Exception {
-        doDualStackProvisioning(true /* shouldDisableAcceptRa */);
-
-        final CompletableFuture<LinkProperties> lpFuture = new CompletableFuture<>();
-
-        // Send RA with 0-lifetime and wait until all global IPv6 addresses, IPv6-related default
-        // route and DNS servers have been removed, then verify if there is IPv4-only, IPv6 link
-        // local address and route to fe80::/64 info left in the LinkProperties.
-        sendRouterAdvertisementWithZeroLifetime();
-        verify(mCb, timeout(TEST_TIMEOUT_MS).atLeastOnce()).onLinkPropertiesChange(
-                argThat(x -> {
-                    // Only IPv4 provisioned and IPv6 link-local address
-                    final boolean isIPv6LinkLocalAndIPv4OnlyProvisioned =
-                            (x.getLinkAddresses().size() == 2
-                                    && x.getDnsServers().size() == 1
-                                    && x.getAddresses().get(0) instanceof Inet4Address
-                                    && x.getDnsServers().get(0) instanceof Inet4Address);
-
-                    if (!isIPv6LinkLocalAndIPv4OnlyProvisioned) return false;
-                    lpFuture.complete(x);
-                    return true;
-                }));
-        final LinkProperties lp = lpFuture.get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        assertNotNull(lp);
-        assertEquals(lp.getAddresses().get(0), CLIENT_ADDR);
-        assertEquals(lp.getDnsServers().get(0), SERVER_ADDR);
-        assertTrue(lp.getAddresses().get(1).isLinkLocalAddress());
-
-        reset(mCb);
-
-        // Send an RA to verify that global IPv6 addresses won't be configured on the interface.
-        sendBasicRouterAdvertisement(false /* waitForRs */);
-        verify(mCb, timeout(TEST_TIMEOUT_MS).times(0)).onLinkPropertiesChange(any());
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testDualStackProvisioning() throws Exception {
-        doDualStackProvisioning(false /* shouldDisableAcceptRa */);
+        doDualStackProvisioning();
 
         verify(mCb, never()).onProvisioningFailure(any());
     }
@@ -2711,7 +2651,7 @@ public abstract class IpClientIntegrationTestCommon {
     public void testNoFdLeaks() throws Exception {
         // Shut down and restart IpClient once to ensure that any fds that are opened the first
         // time it runs do not cause the test to fail.
-        doDualStackProvisioning(false /* shouldDisableAcceptRa */);
+        doDualStackProvisioning();
         shutdownAndRecreateIpClient();
 
         // Unfortunately we cannot use a large number of iterations as it would make the test run
@@ -2719,7 +2659,7 @@ public abstract class IpClientIntegrationTestCommon {
         final int iterations = 10;
         final int before = getNumOpenFds();
         for (int i = 0; i < iterations; i++) {
-            doDualStackProvisioning(false /* shouldDisableAcceptRa */);
+            doDualStackProvisioning();
             shutdownAndRecreateIpClient();
             // The last time this loop runs, mIpc will be shut down in tearDown.
         }
@@ -2907,13 +2847,10 @@ public abstract class IpClientIntegrationTestCommon {
 
     private void startGratuitousArpAndNaAfterRoamingTest(boolean isGratuitousArpNaRoamingEnabled,
             boolean hasIpv4, boolean hasIpv6) throws Exception {
-        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                MacAddress.fromString(TEST_DEFAULT_BSSID));
         final ScanResultInfo scanResultInfo =
                 makeScanResultInfo(TEST_DEFAULT_SSID, TEST_DEFAULT_BSSID);
         final ProvisioningConfiguration.Builder prov = new ProvisioningConfiguration.Builder()
                 .withoutIpReachabilityMonitor()
-                .withLayer2Information(layer2Info)
                 .withScanResultInfo(scanResultInfo)
                 .withDisplayName("ssid");
         if (!hasIpv4) prov.withoutIPv4();
@@ -3006,120 +2943,5 @@ public abstract class IpClientIntegrationTestCommon {
         waitForGratuitousArpAndNaPacket(arpList, naList);
         assertEquals(0, naList.size());
         assertEquals(1, arpList.size());
-    }
-
-    private void doInitialBssidSetupTest(final Layer2Information layer2Info,
-            final ScanResultInfo scanResultInfo) throws Exception {
-        ProvisioningConfiguration.Builder prov = new ProvisioningConfiguration.Builder()
-                .withoutIpReachabilityMonitor()
-                .withLayer2Information(layer2Info)
-                .withScanResultInfo(scanResultInfo)
-                .withDisplayName("\"0001docomo\"")
-                .withoutIPv6();
-
-        setDhcpFeatures(false /* isDhcpLeaseCacheEnabled */, true /* shouldReplyRapidCommitAck */,
-                false /* isDhcpIpConflictDetectEnabled */, false /* isIPv6OnlyPreferredEnabled */);
-        startIpClientProvisioning(prov.build());
-
-        handleDhcpPackets(true /* isSuccessLease */, TEST_LEASE_DURATION_S,
-                true /* shouldReplyRapidCommitAck */, TEST_DEFAULT_MTU, null /* serverSentUrl */);
-        verifyIPv4OnlyProvisioningSuccess(Collections.singletonList(CLIENT_ADDR));
-        forceLayer2Roaming();
-    }
-
-    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromLayer2Info() throws Exception {
-        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                MacAddress.fromString(TEST_DEFAULT_BSSID));
-
-        doInitialBssidSetupTest(layer2Info, null /* scanResultInfo */);
-
-        // Initial BSSID comes from layer2Info, it's different with target roaming bssid,
-        // then verify that DHCPREQUEST packet is sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket();
-        assertTrue(packet instanceof DhcpRequestPacket);
-    }
-
-    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromLayer2Info_NullBssid() throws Exception {
-        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                null /* bssid */);
-        final ScanResultInfo scanResultInfo =
-                makeScanResultInfo(TEST_DEFAULT_SSID, TEST_DHCP_ROAM_BSSID);
-
-        doInitialBssidSetupTest(layer2Info, scanResultInfo);
-
-        // Initial BSSID comes from layer2Info, it's null, no DHCPREQUEST packet
-        // will be sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket(TEST_TIMEOUT_MS);
-        assertNull(packet);
-    }
-
-    @Test @IgnoreUpTo(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromLayer2Info_SameRoamingBssid() throws Exception {
-        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                MacAddress.fromString(TEST_DHCP_ROAM_BSSID));
-
-        doInitialBssidSetupTest(layer2Info, null /* scanResultInfo */);
-
-        // Initial BSSID comes from layer2Info, it's same with target roaming bssid,
-        // no DHCPREQUEST packet will be sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket(TEST_TIMEOUT_MS);
-        assertNull(packet);
-    }
-
-    @Test @IgnoreAfter(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromScanResultInfo() throws Exception {
-        final ScanResultInfo scanResultInfo =
-                makeScanResultInfo(TEST_DEFAULT_SSID, TEST_DEFAULT_BSSID);
-
-        doInitialBssidSetupTest(null /* layer2Info */, scanResultInfo);
-
-        // Initial BSSID comes from ScanResultInfo, it's different with target roaming bssid,
-        // then verify that DHCPREQUEST packet is sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket();
-        assertTrue(packet instanceof DhcpRequestPacket);
-    }
-
-    @Test @IgnoreAfter(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromScanResultInfo_SameRoamingBssid() throws Exception {
-        final ScanResultInfo scanResultInfo =
-                makeScanResultInfo(TEST_DEFAULT_SSID, TEST_DHCP_ROAM_BSSID);
-
-        doInitialBssidSetupTest(null /* layer2Info */, scanResultInfo);
-
-        // Initial BSSID comes from ScanResultInfo, it's same with target roaming bssid,
-        // no DHCPREQUEST packet will be sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket(TEST_TIMEOUT_MS);
-        assertNull(packet);
-    }
-
-    @Test @IgnoreAfter(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromScanResultInfo_BrokenInitialBssid() throws Exception {
-        final ScanResultInfo scanResultInfo =
-                makeScanResultInfo(TEST_DEFAULT_SSID, "00:11:22:33:44:");
-
-        doInitialBssidSetupTest(null /* layer2Info */, scanResultInfo);
-
-        // Initial BSSID comes from ScanResultInfo, it's broken MAC address format and fallback
-        // to null layer2Info, no DHCPREQUEST packet will be sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket(TEST_TIMEOUT_MS);
-        assertNull(packet);
-    }
-
-    @Test @IgnoreAfter(Build.VERSION_CODES.R)
-    public void testSetInitialBssidFromScanResultInfo_BrokenInitialBssidFallback()
-            throws Exception {
-        final Layer2Information layer2Info = new Layer2Information(TEST_L2KEY, TEST_CLUSTER,
-                MacAddress.fromString(TEST_DEFAULT_BSSID));
-        final ScanResultInfo scanResultInfo =
-                makeScanResultInfo(TEST_DEFAULT_SSID, "00:11:22:33:44:");
-
-        doInitialBssidSetupTest(layer2Info, scanResultInfo);
-
-        // Initial BSSID comes from ScanResultInfo, it's broken MAC address format and fallback
-        // to check layer2Info, then verify DHCPREQUEST packet will be sent after roaming.
-        final DhcpPacket packet = getNextDhcpPacket();
-        assertTrue(packet instanceof DhcpRequestPacket);
     }
 }

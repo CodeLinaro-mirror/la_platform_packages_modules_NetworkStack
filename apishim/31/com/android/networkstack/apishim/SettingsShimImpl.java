@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.android.networkstack.apishim.api31;
+package com.android.networkstack.apishim;
 
 import android.content.Context;
 import android.os.Build;
@@ -48,7 +48,9 @@ public class SettingsShimImpl
     public boolean checkAndNoteWriteSettingsOperation(@NonNull Context context, int uid,
             @NonNull String callingPackage, @Nullable String callingAttributionTag,
             boolean throwException) {
+        // Since checkAndNoteWriteSettingsOperation with callingAttributionTag (S method) is not
+        // available in AOSP, calling R method (same as API 30 shim) temporary.
         return Settings.checkAndNoteWriteSettingsOperation(context, uid, callingPackage,
-                callingAttributionTag, throwException);
+                throwException);
     }
 }
