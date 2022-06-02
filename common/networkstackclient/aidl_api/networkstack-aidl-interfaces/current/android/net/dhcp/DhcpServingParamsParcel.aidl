@@ -45,4 +45,5 @@ parcelable DhcpServingParamsParcel {
   boolean metered;
   int singleClientAddr = 0;
   boolean changePrefixOnDecline = false;
+  int leasesSubnetPrefixLength = 0;
 }
