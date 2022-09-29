@@ -28,12 +28,9 @@ import android.net.ConnectivityManager;
 import android.net.INetd;
 import android.net.LinkProperties;
 import android.net.RouteInfo;
-import android.net.ip.IpNeighborMonitor.NeighborEvent;
-import android.net.ip.IpNeighborMonitor.NeighborEventConsumer;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.IpReachabilityEvent;
 import android.net.networkstack.aidl.ip.ReachabilityLossReason;
-import android.net.util.SharedLog;
 import android.os.ConditionVariable;
 import android.os.Handler;
 import android.os.Looper;
@@ -54,6 +51,10 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
 import com.android.net.module.util.DeviceConfigUtils;
 import com.android.net.module.util.InterfaceParams;
+import com.android.net.module.util.SharedLog;
+import com.android.net.module.util.ip.IpNeighborMonitor;
+import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEvent;
+import com.android.net.module.util.ip.IpNeighborMonitor.NeighborEventConsumer;
 import com.android.net.module.util.netlink.StructNdMsg;
 import com.android.networkstack.R;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
@@ -667,7 +668,7 @@ public class IpReachabilityMonitor {
     }
 
     /**
-     * Log NUD failure metrics with new Westworld APIs while the function using mMetricsLog API
+     * Log NUD failure metrics with new statsd APIs while the function using mMetricsLog API
      * still sends the legacy metrics, @see #logNudFailed.
      */
     private void logNeighborLostEvent(final NeighborEvent event, final NudEventType type) {
