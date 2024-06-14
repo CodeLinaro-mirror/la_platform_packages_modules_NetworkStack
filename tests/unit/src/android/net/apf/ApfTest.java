@@ -17,7 +17,7 @@
 package android.net.apf;
 
 import static android.net.apf.ApfCounterTracker.Counter.getCounterEnumFromOffset;
-import static android.net.apf.BaseApfGenerator.APF_VERSION_4;
+import static android.net.apf.BaseApfGenerator.APF_VERSION_3;
 import static android.net.apf.BaseApfGenerator.DROP_LABEL;
 import static android.net.apf.BaseApfGenerator.MemorySlot;
 import static android.net.apf.BaseApfGenerator.PASS_LABEL;
@@ -73,7 +73,6 @@ import android.net.apf.ApfCounterTracker.Counter;
 import android.net.apf.ApfFilter.ApfConfiguration;
 import android.net.apf.ApfTestUtils.MockIpClientCallback;
 import android.net.apf.ApfTestUtils.TestApfFilter;
-import android.net.apf.ApfTestUtils.TestLegacyApfFilter;
 import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.metrics.IpConnectivityLog;
 import android.os.Build;
@@ -835,23 +834,23 @@ public class ApfTest {
         ApfV4Generator gen;
 
         // Load data with no offset: lddw R0, [0 + r1]
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadData(R0, 0);
         assertProgramEquals(new byte[]{LDDW_OP | SIZE0}, gen.generate());
 
         // Store data with 8bit negative offset: lddw r0, [-42 + r1]
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addStoreData(R0, -42);
         assertProgramEquals(new byte[]{STDW_OP | SIZE8, -42}, gen.generate());
 
         // Store data to R1 with 16bit negative offset: stdw r1, [-0x1122 + r0]
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addStoreData(R1, -0x1122);
         assertProgramEquals(new byte[]{STDW_OP | SIZE16 | R1_REG, (byte)0xEE, (byte)0xDE},
                 gen.generate());
 
         // Load data to R1 with 32bit negative offset: lddw r1, [0xDEADBEEF + r0]
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadData(R1, 0xDEADBEEF);
         assertProgramEquals(
                 new byte[]{LDDW_OP | SIZE32 | R1_REG,
@@ -869,12 +868,12 @@ public class ApfTest {
         byte[] expected_data = data.clone();
 
         // No memory access instructions: should leave the data segment untouched.
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3);
         assertDataMemoryContents(PASS, gen.generate(), packet, data, expected_data);
 
         // Expect value 0x87654321 to be stored starting from address -11 from the end of the
         // data buffer, in big-endian order.
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R0, 0x87654321);
         gen.addLoadImmediate(R1, -5);
         gen.addStoreData(R0, -6);  // -5 + -6 = -11 (offset +5 with data_len=16)
@@ -891,7 +890,7 @@ public class ApfTest {
     @Test
     public void testApfDataRead() throws IllegalInstructionException, Exception {
         // Program that DROPs if address 10 (-6) contains 0x87654321.
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R1, 1000);
         gen.addLoadData(R0, -1006);  // 1000 + -1006 = -6 (offset +10 with data_len=16)
         gen.addJumpIfR0Equals(0x87654321, DROP_LABEL);
@@ -920,7 +919,7 @@ public class ApfTest {
      */
     @Test
     public void testApfDataReadModifyWrite() throws IllegalInstructionException, Exception {
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R1, -22);
         gen.addLoadData(R0, 0);  // Load from address 32 -22 + 0 = 10
         gen.addAdd(0x78453412);  // 87654321 + 78453412 = FFAA7733
@@ -947,7 +946,7 @@ public class ApfTest {
         byte[] expected_data = data;
 
         // Program that DROPs unconditionally. This is our the baseline.
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R0, 3);
         gen.addLoadData(R1, 7);
         gen.addJump(DROP_LABEL);
@@ -957,7 +956,7 @@ public class ApfTest {
         // 3 instructions, all normal opcodes (LI, LDDW, JMP) with 1 byte immediate = 6 byte program
         // 32 byte data length, for a total of 38 byte ram len.
         // APFv6 needs to round this up to be a multiple of 4, so 40.
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R0, 20);
         if (mApfVersion == 4) {
             gen.addLoadData(R1, 15);  // R0(20)+15+U32[0..3] >= 6 prog + 32 data, so invalid
@@ -968,21 +967,21 @@ public class ApfTest {
         assertDataMemoryContents(PASS, gen.generate(), packet, data, expected_data);
 
         // Subtracting an immediate should work...
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R0, 20);
         gen.addLoadData(R1, -4);
         gen.addJump(DROP_LABEL);
         assertDataMemoryContents(DROP, gen.generate(), packet, data, expected_data);
 
         // ...and underflowing simply wraps around to the end of the buffer...
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R0, 20);
         gen.addLoadData(R1, -30);
         gen.addJump(DROP_LABEL);
         assertDataMemoryContents(DROP, gen.generate(), packet, data, expected_data);
 
         // ...but doesn't allow accesses before the start of the buffer
-        gen = new ApfV4Generator(APF_VERSION_4);
+        gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R0, 20);
         gen.addLoadData(R1, -1000);
         gen.addJump(DROP_LABEL);  // Not reached.
@@ -3135,33 +3134,17 @@ public class ApfTest {
     }
 
     private TestAndroidPacketFilter makeTestApfFilter(ApfConfiguration config,
-            MockIpClientCallback ipClientCallback, boolean isLegacy) throws Exception {
-        final TestAndroidPacketFilter apfFilter;
-        if (isLegacy) {
-            apfFilter = new TestLegacyApfFilter(mContext, config, ipClientCallback,
-                    mIpConnectivityLog, mNetworkQuirkMetrics, mDependencies, mClock);
-        } else {
-            apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mNetworkQuirkMetrics,
+            MockIpClientCallback ipClientCallback) throws Exception {
+        return new TestApfFilter(mContext, config, ipClientCallback, mNetworkQuirkMetrics,
                     mDependencies, mClock);
-        }
-        return apfFilter;
     }
 
-    // LegacyApfFilter ignores zero lifetime RAs (doesn't update program) but ApfFilter won't.
-    private void verifyUpdateProgramForZeroLifetimeRa(MockIpClientCallback ipClientCallback,
-            boolean isLegacy) {
-        if (isLegacy) {
-            ipClientCallback.assertNoProgramUpdate();
-        } else {
-            ipClientCallback.assertProgramUpdateAndGet();
-        }
-    }
 
-    private void verifyInstallPacketFilterFailure(boolean isLegacy) throws Exception {
+    @Test
+    public void testInstallPacketFilterFailure() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback(false);
         final ApfConfiguration config = getDefaultConfig();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         verify(mNetworkQuirkMetrics).setEvent(NetworkQuirkEvent.QE_APF_INSTALL_FAILURE);
         verify(mNetworkQuirkMetrics).statsWrite();
         reset(mNetworkQuirkMetrics);
@@ -3172,23 +3155,14 @@ public class ApfTest {
         verify(mNetworkQuirkMetrics).statsWrite();
     }
 
-    @Test
-    public void testInstallPacketFilterFailure() throws Exception {
-        verifyInstallPacketFilterFailure(false /* isLegacy */);
-    }
 
     @Test
-    public void testInstallPacketFilterFailure_LegacyApfFilter() throws Exception {
-        verifyInstallPacketFilterFailure(true /* isLegacy */);
-    }
-
-    private void verifyApfProgramOverSize(boolean isLegacy) throws Exception {
+    public void testApfProgramOverSize() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final ApfCapabilities capabilities = new ApfCapabilities(2, 512, ARPHRD_ETHER);
         config.apfCapabilities = capabilities;
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         byte[] program = ipClientCallback.assertProgramUpdateAndGet();
         final byte[] ra = buildLargeRa();
         apfFilter.pretendPacketReceived(ra);
@@ -3199,27 +3173,12 @@ public class ApfTest {
     }
 
     @Test
-    public void testApfProgramOverSize() throws Exception {
-        verifyApfProgramOverSize(false /* isLegacy */);
-    }
-
-    @Test
-    public void testApfProgramOverSize_LegacyApfFilter() throws Exception {
-        verifyApfProgramOverSize(true /* isLegacy */);
-    }
-
-    private void verifyGenerateApfProgramException(boolean isLegacy) throws Exception {
+    public void testGenerateApfProgramException() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final TestAndroidPacketFilter apfFilter;
-        if (isLegacy) {
-            apfFilter = new TestLegacyApfFilter(mContext, config, ipClientCallback,
-                    mIpConnectivityLog, mNetworkQuirkMetrics, mDependencies,
-                    true /* throwsExceptionWhenGeneratesProgram */);
-        } else {
-            apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mNetworkQuirkMetrics,
-                    mDependencies, true /* throwsExceptionWhenGeneratesProgram */);
-        }
+        apfFilter = new TestApfFilter(mContext, config, ipClientCallback, mNetworkQuirkMetrics,
+                mDependencies, true /* throwsExceptionWhenGeneratesProgram */);
         synchronized (apfFilter) {
             apfFilter.installNewProgramLocked();
         }
@@ -3228,16 +3187,7 @@ public class ApfTest {
     }
 
     @Test
-    public void testGenerateApfProgramException() throws Exception {
-        verifyGenerateApfProgramException(false /* isLegacy */);
-    }
-
-    @Test
-    public void testGenerateApfProgramException_LegacyApfFilter() throws Exception {
-        verifyGenerateApfProgramException(true /* isLegacy */);
-    }
-
-    private void verifyApfSessionInfoMetrics(boolean isLegacy) throws Exception {
+    public void testApfSessionInfoMetrics() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final ApfCapabilities capabilities = new ApfCapabilities(4, 4096, ARPHRD_ETHER);
@@ -3245,8 +3195,7 @@ public class ApfTest {
         final long startTimeMs = 12345;
         final long durationTimeMs = config.minMetricsSessionDurationMs;
         doReturn(startTimeMs).when(mClock).elapsedRealtime();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         int maxProgramSize = 0;
         int numProgramUpdated = 0;
         byte[] program = ipClientCallback.assertProgramUpdateAndGet();
@@ -3318,23 +3267,13 @@ public class ApfTest {
     }
 
     @Test
-    public void testApfSessionInfoMetrics() throws Exception {
-        verifyApfSessionInfoMetrics(false /* isLegacy */);
-    }
-
-    @Test
-    public void testApfSessionInfoMetrics_LegacyApfFilter() throws Exception {
-        verifyApfSessionInfoMetrics(true /* isLegacy */);
-    }
-
-    private void verifyIpClientRaInfoMetrics(boolean isLegacy) throws Exception {
+    public void testIpClientRaInfoMetrics() throws Exception {
         final MockIpClientCallback ipClientCallback = new MockIpClientCallback();
         final ApfConfiguration config = getDefaultConfig();
         final long startTimeMs = 12345;
         final long durationTimeMs = config.minMetricsSessionDurationMs;
         doReturn(startTimeMs).when(mClock).elapsedRealtime();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         byte[] program = ipClientCallback.assertProgramUpdateAndGet();
 
         final int routerLifetime = 1000;
@@ -3379,27 +3318,20 @@ public class ApfTest {
         apfFilter.pretendPacketReceived(raInvalid.build());
         ipClientCallback.assertNoProgramUpdate();
         apfFilter.pretendPacketReceived(raZeroRouterLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertProgramUpdateAndGet();
         apfFilter.pretendPacketReceived(raZeroPioValidLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertProgramUpdateAndGet();
         apfFilter.pretendPacketReceived(raZeroRdnssLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertProgramUpdateAndGet();
         apfFilter.pretendPacketReceived(raZeroRioRouteLifetime.build());
-        verifyUpdateProgramForZeroLifetimeRa(ipClientCallback, isLegacy);
+        ipClientCallback.assertProgramUpdateAndGet();
 
         // Write metrics data to statsd pipeline when shutdown.
         doReturn(startTimeMs + durationTimeMs).when(mClock).elapsedRealtime();
         apfFilter.shutdown();
 
         // Verify each metric fields in IpClientRaInfoMetrics.
-        if (isLegacy) {
-            // LegacyApfFilter will purge expired RAs before adding new RA. Every time a new zero
-            // lifetime RA is received, zero lifetime RAs except the newly added one will be
-            // cleared, so the number of distinct RAs is 3 (ra1, ra2 and the newly added RA).
-            verify(mIpClientRaInfoMetrics).setMaxNumberOfDistinctRas(3);
-        } else {
-            verify(mIpClientRaInfoMetrics).setMaxNumberOfDistinctRas(6);
-        }
+        verify(mIpClientRaInfoMetrics).setMaxNumberOfDistinctRas(6);
         verify(mIpClientRaInfoMetrics).setNumberOfZeroLifetimeRas(4);
         verify(mIpClientRaInfoMetrics).setNumberOfParsingErrorRas(1);
         verify(mIpClientRaInfoMetrics).setLowestRouterLifetimeSeconds(routerLifetime);
@@ -3407,16 +3339,6 @@ public class ApfTest {
         verify(mIpClientRaInfoMetrics).setLowestRioRouteLifetimeSeconds(routeLifetime);
         verify(mIpClientRaInfoMetrics).setLowestRdnssLifetimeSeconds(rdnssLifetime);
         verify(mIpClientRaInfoMetrics).statsWrite();
-    }
-
-    @Test
-    public void testIpClientRaInfoMetrics() throws Exception {
-        verifyIpClientRaInfoMetrics(false /* isLegacy */);
-    }
-
-    @Test
-    public void testIpClientRaInfoMetrics_LegacyApfFilter() throws Exception {
-        verifyIpClientRaInfoMetrics(true /* isLegacy */);
     }
 
     private void verifyNoMetricsWrittenForShortDuration(boolean isLegacy) throws Exception {
@@ -3427,8 +3349,7 @@ public class ApfTest {
 
         // Verify no metrics data written to statsd for duration less than durationTimeMs.
         doReturn(startTimeMs).when(mClock).elapsedRealtime();
-        final TestAndroidPacketFilter apfFilter =
-                makeTestApfFilter(config, ipClientCallback, isLegacy);
+        final TestAndroidPacketFilter apfFilter = makeTestApfFilter(config, ipClientCallback);
         doReturn(startTimeMs + durationTimeMs - 1).when(mClock).elapsedRealtime();
         apfFilter.shutdown();
         verify(mApfSessionInfoMetrics, never()).statsWrite();
@@ -3467,7 +3388,7 @@ public class ApfTest {
 
     @Test
     public void testApfGeneratorPropagation() throws IllegalInstructionException {
-        ApfV4Generator v4Gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator v4Gen = new ApfV4Generator(APF_VERSION_3);
         ApfV6Generator v6Gen = new ApfV6Generator(1024);
         assertEquals(4, deriveApfGeneratorVersion(v4Gen));
         assertEquals(6, deriveApfGeneratorVersion(v6Gen));
@@ -3475,7 +3396,7 @@ public class ApfTest {
 
     @Test
     public void testFullApfV4ProgramGenerationIPV6() throws IllegalInstructionException {
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R1, -4);
         gen.addLoadData(R0, 0);
         gen.addAdd(1);
@@ -3628,7 +3549,7 @@ public class ApfTest {
 
     @Test
     public void testFullApfV4ProgramGenerationIPV4() throws IllegalInstructionException {
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3);
         gen.addLoadImmediate(R1, -4);
         gen.addLoadData(R0, 0);
         gen.addAdd(1);
@@ -3749,7 +3670,7 @@ public class ApfTest {
 
     @Test
     public void testFullApfV4ProgramGenerationNatTKeepAliveV4() throws IllegalInstructionException {
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4, true);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3, true);
         gen.addLoadImmediate(R1, -4);
         gen.addLoadData(R0, 0);
         gen.addAdd(1);
@@ -3864,7 +3785,7 @@ public class ApfTest {
 
     @Test
     public void testInfiniteLifetimeFullApfV4ProgramGeneration() throws IllegalInstructionException {
-        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_4, true);
+        ApfV4Generator gen = new ApfV4Generator(APF_VERSION_3, true);
         gen.addLoadCounter(R0, getCounterEnumFromOffset(-8));
         gen.addAdd(1);
         gen.addStoreData(R0, 0);
