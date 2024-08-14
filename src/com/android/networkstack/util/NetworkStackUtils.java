@@ -274,6 +274,11 @@ public class NetworkStackUtils {
     public static final String IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION =
             "ipclient_dhcpv6_pd_preferred_flag_version";
 
+    /**
+     * Experiment flag to enable Discovery of Designated Resolvers (DDR).
+     */
+    public static final String DNS_DDR_VERSION = "dns_ddr_version";
+
     /**** BEGIN Feature Kill Switch Flags ****/
 
     /**
@@ -300,6 +305,11 @@ public class NetworkStackUtils {
      * "ARP offload" not "ARP offload force disabled".
      */
     public static final String APF_HANDLE_ARP_OFFLOAD = "apf_handle_arp_offload_force_disable";
+
+    /**
+     * Kill switch flag to disable the feature of handle nd offload in Apf.
+     */
+    public static final String APF_HANDLE_ND_OFFLOAD = "apf_handle_nd_offload";
 
     static {
         System.loadLibrary("networkstackutilsjni");
