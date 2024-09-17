@@ -41,4 +41,5 @@ parcelable PrivateDnsConfigParcel {
   String[] dohIps = {};
   String dohPath = "";
   int dohPort = (-1) /* -1 */;
+  boolean ddrEnabled = false;
 }
