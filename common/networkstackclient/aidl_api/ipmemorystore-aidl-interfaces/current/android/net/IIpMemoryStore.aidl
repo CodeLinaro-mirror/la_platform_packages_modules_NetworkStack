@@ -43,4 +43,10 @@ interface IIpMemoryStore {
   oneway void factoryReset();
   oneway void delete(String l2Key, boolean needWipe, android.net.ipmemorystore.IOnStatusAndCountListener listener);
   oneway void deleteCluster(String cluster, boolean needWipe, android.net.ipmemorystore.IOnStatusAndCountListener listener);
+  oneway void storeNetworkEvent(String cluster, long timestamp, long expiry, int eventType, android.net.ipmemorystore.IOnStatusListener listener);
+  oneway void retrieveNetworkEventCount(String cluster, in long[] sinceTimes, in int[] eventTypes, android.net.ipmemorystore.IOnNetworkEventCountRetrievedListener listener);
+  const int NETWORK_EVENT_NUD_FAILURE_ROAM = 0;
+  const int NETWORK_EVENT_NUD_FAILURE_CONFIRM = 1;
+  const int NETWORK_EVENT_NUD_FAILURE_ORGANIC = 2;
+  const int NETWORK_EVENT_NUD_FAILURE_MAC_ADDRESS_CHANGED = 3;
 }
