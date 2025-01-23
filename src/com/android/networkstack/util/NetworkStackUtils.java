@@ -68,7 +68,7 @@ public class NetworkStackUtils {
     public static final String CAPTIVE_PORTAL_OTHER_HTTP_URLS = "captive_portal_other_http_urls";
 
     /**
-     * A comma separated list of URLs used for network validation. in addition to the HTTPS url
+     * A comma separated list of URLs used for network validation in addition to the HTTPS url
      * associated with the CAPTIVE_PORTAL_HTTPS_URL settings.
      */
     public static final String CAPTIVE_PORTAL_OTHER_HTTPS_URLS = "captive_portal_other_https_urls";
@@ -295,6 +295,18 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION =
             "ip_reachability_ignore_nud_failure_version";
+
+    /**
+     * Experiment flag to enable the feature of handle IPv4 ping offload in Apf.
+     */
+    public static final String APF_HANDLE_PING4_OFFLOAD_VERSION =
+            "apf_handle_ping_offload_version";
+
+    /**
+     * Experiment flag to enable the feature of handle IGMP offload in Apf.
+     */
+    public static final String APF_HANDLE_IGMP_OFFLOAD_VERSION =
+            "apf_handle_igmp_offload_version";
 
     /**** BEGIN Feature Kill Switch Flags ****/
 
