@@ -65,6 +65,7 @@ import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.net.ConnectivityManager;
 import android.net.INetd;
@@ -190,6 +191,7 @@ public class IpClientTest {
     @Mock private FileDescriptor mFd;
     @Mock private PrintWriter mWriter;
     @Mock private IpClientNetlinkMonitor mNetlinkMonitor;
+    @Mock private PackageManager mPackageManager;
     @Mock private ApfFilter mApfFilter;
 
     private InterfaceParams mIfParams;
@@ -216,6 +218,7 @@ public class IpClientTest {
         when(mDependencies.makeIpClientNetlinkMonitor(
                 any(), any(), any(), anyInt(), anyBoolean(), any())).thenReturn(mNetlinkMonitor);
         when(mNetlinkMonitor.start()).thenReturn(true);
+        doReturn(mPackageManager).when(mContext).getPackageManager();
 
         mIfParams = null;
     }
@@ -928,6 +931,28 @@ public class IpClientTest {
         assertEquals(SdkLevel.isAtLeastS() ? 4 : 3, actual.apfVersionSupported);
         assertEquals(4096, actual.apfRamSize);
 
+        verifyShutdown(ipc);
+    }
+
+    @Test
+    public void testForceApfV2OnLowRam() throws Exception {
+        final IpClient ipc = makeIpClient(TEST_IFNAME);
+        ProvisioningConfiguration.Builder config = new ProvisioningConfiguration.Builder()
+                .withoutIPv4()
+                .withoutIpReachabilityMonitor()
+                .withInitialConfiguration(
+                        conf(links(TEST_LOCAL_ADDRESSES), prefixes(TEST_PREFIXES), ips()))
+                .withApfCapabilities(
+                        new ApfCapabilities(3 /* version */, 512 /* maxProgramSize */,
+                                ARPHRD_ETHER));
+        ipc.startProvisioning(config.build());
+        final ArgumentCaptor<ApfConfiguration> configCaptor = ArgumentCaptor.forClass(
+                ApfConfiguration.class);
+        verify(mDependencies, timeout(TEST_TIMEOUT_MS)).maybeCreateApfFilter(
+                any(), any(), configCaptor.capture(), any(), any(), any());
+
+        final ApfConfiguration apfConfig = configCaptor.getValue();
+        assertEquals(2, apfConfig.apfVersionSupported);
         verifyShutdown(ipc);
     }
 
