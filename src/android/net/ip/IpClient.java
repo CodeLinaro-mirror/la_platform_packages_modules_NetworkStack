@@ -16,6 +16,7 @@
 
 package android.net.ip;
 
+import static android.content.pm.PackageManager.FEATURE_LEANBACK;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_CONFIRM;
 import static android.net.IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ORGANIC;
@@ -452,8 +453,9 @@ public class IpClient extends StateMachine {
         /**
          * Called to indicate that a new APF program must be installed to filter incoming packets.
          */
-        public boolean installPacketFilter(byte[] filter) {
-            log("installPacketFilter(byte[" + filter.length + "])");
+        public boolean installPacketFilter(byte[] filter, @NonNull String filterConfig) {
+            log("installPacketFilter(byte[" + filter.length + "])" + " config: "
+                    + filterConfig);
             try {
                 if (mApfDebug) {
                     mApfLog.log("updated APF program: " + HexDump.toHexString(filter));
@@ -1059,8 +1061,8 @@ public class IpClient extends StateMachine {
         mCallback = new IpClientCallbacksWrapper(callback, mLog, mApfLog, mShim, mApfDebug);
         mIpClientApfController = new ApfFilter.IApfController() {
             @Override
-            public boolean installPacketFilter(byte[] filter) {
-                return mCallback.installPacketFilter(filter);
+            public boolean installPacketFilter(byte[] filter, String filterConfig) {
+                return mCallback.installPacketFilter(filter, filterConfig);
             }
 
             @Override
@@ -1091,8 +1093,9 @@ public class IpClient extends StateMachine {
                 mContext, APF_HANDLE_ARP_OFFLOAD);
         mApfHandleNdOffload = mDependencies.isFeatureNotChickenedOut(
                 mContext, APF_HANDLE_ND_OFFLOAD);
-        // TODO: turn on APF mDNS offload.
-        mApfHandleMdnsOffload = false;
+        // TODO: turn on APF mDNS offload on handhelds.
+        mApfHandleMdnsOffload = isAtLeast25Q2() && context.getPackageManager().hasSystemFeature(
+                FEATURE_LEANBACK);
         mApfHandleIgmpOffload =
                 isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
                         APF_HANDLE_IGMP_OFFLOAD_VERSION);
@@ -1628,7 +1631,7 @@ public class IpClient extends StateMachine {
                             throw new IllegalStateException("APF filter must first be paused");
                         }
                         mApfFilter.getApfController().installPacketFilter(
-                                HexDump.hexStringToByteArray(optarg));
+                                HexDump.hexStringToByteArray(optarg), "program from shell command");
                         result.complete("success");
                         break;
                     case "capabilities":
@@ -2756,7 +2759,12 @@ public class IpClient extends StateMachine {
         // For now only support generating programs for Ethernet frames. If this restriction is
         // lifted the program generator will need its offsets adjusted.
         if (apfCaps.apfPacketFormat != ARPHRD_ETHER) return null;
-        if (SdkLevel.isAtLeastS()) {
+        // For devices declare APFv3+ support but have less than 1024 bytes of RAM available for
+        // the APF, set the APF version to v2. The counter region will use a few hundred bytes of
+        // RAM. If the RAM size is too small, we should reserve that region for program use.
+        if (apfCaps.apfVersionSupported >= 3 && apfCaps.maximumApfProgramSize < 1024) {
+            apfConfig.apfVersionSupported = 2;
+        } else if (SdkLevel.isAtLeastS()) {
             apfConfig.apfVersionSupported = apfCaps.apfVersionSupported;
         } else {
             // In Android R, ApfCapabilities#hasDataAccess() can be modified by OEMs. The
