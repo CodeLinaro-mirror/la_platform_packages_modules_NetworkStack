@@ -83,9 +83,15 @@ import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
 import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING4_OFFLOAD_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING6_OFFLOAD;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_PING6_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_POLLING_COUNTERS_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION;
@@ -816,7 +822,9 @@ public class IpClient extends StateMachine {
     private final boolean mApfHandleNdOffload;
     private final boolean mApfHandleMdnsOffload;
     private final boolean mApfHandleIgmpOffload;
+    private final boolean mApfHandleMldOffload;
     private final boolean mApfHandleIpv4PingOffload;
+    private final boolean mApfHandleIpv6PingOffload;
     private final boolean mIgnoreNudFailureEnabled;
     private final boolean mDhcp6PdPreferredFlagEnabled;
     private final boolean mReplaceNetdWithNetlinkEnabled;
@@ -1097,11 +1105,25 @@ public class IpClient extends StateMachine {
         mApfHandleMdnsOffload = isAtLeast25Q2() && context.getPackageManager().hasSystemFeature(
                 FEATURE_LEANBACK);
         mApfHandleIgmpOffload =
-                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
-                        APF_HANDLE_IGMP_OFFLOAD_VERSION);
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_IGMP_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_IGMP_OFFLOAD_VERSION)
+                    );
+        mApfHandleMldOffload =
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_MLD_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_MLD_OFFLOAD_VERSION)
+                    );
         mApfHandleIpv4PingOffload =
-                isAtLeast25Q2() || mDependencies.isFeatureEnabled(context,
-                        APF_HANDLE_PING4_OFFLOAD_VERSION);
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_PING4_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_PING4_OFFLOAD_VERSION)
+                    );
+        mApfHandleIpv6PingOffload =
+                mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_PING6_OFFLOAD)
+                    && (isAtLeast25Q2()
+                        || mDependencies.isFeatureEnabled(context, APF_HANDLE_PING6_OFFLOAD_VERSION)
+                );
         mPopulateLinkAddressLifetime = mDependencies.isFeatureEnabled(context,
                 IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION);
         mIgnoreNudFailureEnabled = mDependencies.isFeatureEnabled(mContext,
@@ -2688,11 +2710,18 @@ public class IpClient extends StateMachine {
 
         if (params.defaultMtu == mInterfaceParams.defaultMtu) return;
 
-        try {
-            mNetd.interfaceSetMtu(mInterfaceName, mInterfaceParams.defaultMtu);
-        } catch (RemoteException | ServiceSpecificException e) {
-            logError("Couldn't reset MTU on " + mInterfaceName + " from "
-                    + params.defaultMtu + " to " + mInterfaceParams.defaultMtu, e);
+        if (mReplaceNetdWithNetlinkEnabled) {
+            if (!NetlinkUtils.setInterfaceMtu(mInterfaceName, mInterfaceParams.defaultMtu)) {
+                logError("Couldn't reset MTU on " + mInterfaceName + " from "
+                        + params.defaultMtu + " to " + mInterfaceParams.defaultMtu);
+            }
+        } else {
+            try {
+                mNetd.interfaceSetMtu(mInterfaceName, mInterfaceParams.defaultMtu);
+            } catch (RemoteException | ServiceSpecificException e) {
+                logError("Couldn't reset MTU on " + mInterfaceName + " from "
+                        + params.defaultMtu + " to " + mInterfaceParams.defaultMtu, e);
+            }
         }
     }
 
@@ -2808,7 +2837,11 @@ public class IpClient extends StateMachine {
         apfConfig.handleNdOffload = mApfHandleNdOffload;
         apfConfig.handleMdnsOffload = mApfHandleMdnsOffload;
         apfConfig.handleIgmpOffload = mApfHandleIgmpOffload;
+        // TODO: Turn on MLD offload on devices with 2048 ~ 3999 bytes of APF RAM.
+        apfConfig.handleMldOffload = mApfHandleMldOffload && apfConfig.apfRamSize >= 4000;
         apfConfig.handleIpv4PingOffload = mApfHandleIpv4PingOffload;
+        // TODO: Turn on Ping6 offload on devices with 2048 ~ 3999 bytes of APF RAM.
+        apfConfig.handleIpv6PingOffload = mApfHandleIpv6PingOffload && apfConfig.apfRamSize >= 4000;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
         return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
