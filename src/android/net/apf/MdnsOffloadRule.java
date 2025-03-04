@@ -91,32 +91,34 @@ public class MdnsOffloadRule {
         /**
          * The QTYPE from the mDNS query that this rule matches.
          */
-        public final int[] mQtypes;
+        public final int mQtype;
 
         /**
          * Creates a new Matcher.
          */
-        public Matcher(byte[] qnames, int[] qtypes) {
+        public Matcher(byte[] qnames, int qtype) {
             mQnames = qnames;
-            mQtypes = qtypes;
+            mQtype = qtype;
         }
 
         @Override
         public boolean equals(Object o) {
-            if (!(o instanceof Matcher matcher)) return false;
-            return Objects.deepEquals(mQnames, matcher.mQnames) && Objects.deepEquals(
-                    mQtypes, matcher.mQtypes);
+            if (this == o) return true;
+            if (!(o instanceof Matcher that)) return false;
+            return mQtype == that.mQtype && Arrays.equals(mQnames, that.mQnames);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(Arrays.hashCode(mQnames), Arrays.hashCode(mQtypes));
+            int result = Objects.hash(mQtype);
+            result = 31 * result + Arrays.hashCode(mQnames);
+            return result;
         }
 
         @Override
         public String toString() {
-            return "Matcher{" + "mQnames=" + HexDump.toHexString(mQnames) + ", mQtypes="
-                    + Arrays.toString(mQtypes) + '}';
+            return "Matcher{" + "mQnames=" + HexDump.toHexString(mQnames) + ", mQtype="
+                    + mQtype + '}';
         }
     }
 
