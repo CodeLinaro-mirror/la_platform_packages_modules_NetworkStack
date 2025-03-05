@@ -61,14 +61,9 @@ public class ApfCounterTracker {
         PASSED_IPV6_HOPOPTS,
         PASSED_IPV6_ICMP,
         PASSED_IPV6_NON_ICMP,
-        PASSED_IPV6_NS_DAD,
-        PASSED_IPV6_NS_NO_ADDRESS,
-        PASSED_IPV6_NS_NO_SLLA_OPTION,
-        PASSED_IPV6_NS_TENTATIVE,
         PASSED_IPV6_UNICAST_NON_ICMP,
         PASSED_NON_IP_UNICAST,
-        PASSED_MDNS,
-        PASSED_MLD,  // see also MAX_PASS_COUNTER below
+        PASSED_MDNS, // see also MAX_PASS_COUNTER below
         DROPPED_ETH_BROADCAST,  // see also MIN_DROP_COUNTER below
         DROPPED_ETHER_OUR_SRC_MAC,
         DROPPED_RA,
@@ -79,7 +74,6 @@ public class ApfCounterTracker {
         DROPPED_IPV4_MULTICAST,
         DROPPED_IPV4_NON_DHCP4,
         DROPPED_IPV4_PING_REQUEST_REPLIED,
-        DROPPED_IPV4_UDP_INVALID,
         DROPPED_IPV6_ICMP6_ECHO_REQUEST_INVALID,
         DROPPED_IPV6_ICMP6_ECHO_REQUEST_REPLIED,
         DROPPED_IPV6_ROUTER_SOLICITATION,
@@ -92,7 +86,6 @@ public class ApfCounterTracker {
         DROPPED_IPV6_NS_INVALID,
         DROPPED_IPV6_NS_OTHER_HOST,
         DROPPED_IPV6_NS_REPLIED_NON_DAD,
-        DROPPED_IPV6_UDP_INVALID,
         DROPPED_802_3_FRAME,
         DROPPED_ETHERTYPE_NOT_ALLOWED,
         DROPPED_IPV4_KEEPALIVE_ACK,
@@ -117,7 +110,7 @@ public class ApfCounterTracker {
          * a given counter.
          */
         public int offset() {
-            return -this.ordinal() * 4;  // Currently, all counters are 32bit long.
+            return -this.value() * 4;  // Currently, all counters are 32bit long.
         }
 
         /**
@@ -147,12 +140,28 @@ public class ApfCounterTracker {
             }
             return RESERVED_OOB;
         }
+
+        /**
+         * Return the label such that if we jump to it, the counter will be increased by 1 and
+         * the packet will be passed.
+         */
+        public short getJumpPassLabel() {
+            return (short) (2 * this.value());
+        }
+
+        /**
+         * Return the label such that if we jump to it, the counter will be increased by 1 and
+         * the packet will be dropped.
+         */
+        public short getJumpDropLabel() {
+            return (short) (2 * this.value() + 1);
+        }
     }
 
     public static final Counter MIN_DROP_COUNTER = Counter.DROPPED_ETH_BROADCAST;
     public static final Counter MAX_DROP_COUNTER = Counter.DROPPED_GARP_REPLY;
     public static final Counter MIN_PASS_COUNTER = Counter.PASSED_ARP_BROADCAST_REPLY;
-    public static final Counter MAX_PASS_COUNTER = Counter.PASSED_MLD;
+    public static final Counter MAX_PASS_COUNTER = Counter.PASSED_MDNS;
 
     private static final String TAG = ApfCounterTracker.class.getSimpleName();
 
