@@ -117,7 +117,6 @@ import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -323,6 +322,8 @@ public abstract class IpClientIntegrationTestCommon {
     // when IpClientLinkObserver sees the RTM_NEWADDR netlink events.
     private static final long TEST_LIFETIME_TOLERANCE_MS = 4_000L;
     private static final long TEST_POLL_NEIGHBOR_PARAMETER_MS = 500L;
+    private static final int TEST_ARP_LOCKTIME_MS = 1500;
+    private static final int TEST_DELAY_FIRST_PROBE_TIME_S = 2;
 
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
@@ -754,6 +755,10 @@ public abstract class IpClientIntegrationTestCommon {
         setFeatureEnabled(NetworkStackUtils.IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION,
                 true /* isDhcp6PrefixDelegationEnabled */);
 
+        // Enable replacement of netd usage with netlink in IpClient.
+        setFeatureEnabled(NetworkStackUtils.IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION,
+                true /* isIpClientReplaceNetdWithNetlinkEnabled */);
+
         // Set flags based on test method annotations.
         final Flag[] flags = testMethod.getAnnotationsByType(Flag.class);
         for (Flag flag : flags) {
@@ -959,9 +964,46 @@ public abstract class IpClientIntegrationTestCommon {
         }
     }
 
+    /**
+     * Set the sysctl "delay_first_probe_time" by executing a shell command as root.
+     *
+     * Directly using "su root echo delay > /proc/sys/net/ipv4/neigh/delay_first_probe_time" fails
+     * because only the "echo delay >" command runs as root; the redirection ">" and the following
+     * sysctl path string is not performed by the root shell, resulting in permission errors.
+     *
+     * Theoretically we want to run "su root sh -c 'echo delay > /proc/sys/net/ipv4/neigh/
+     * delay_first_probe_time'" to change the sysctl, however, the `executeShellCommand`
+     * function splits commands based on spaces, even within single quotes, so this doesn't work.
+     * Instead, use `executeShellCommandRw` to execute a shell command receiving from stdin.
+     */
+    private void setNudDelayFirstProbeTime(int delay) throws Exception {
+        final ParcelFileDescriptor[] fds = InstrumentationRegistry.getInstrumentation()
+                .getUiAutomation().executeShellCommandRw("su root sh");
+
+        final ParcelFileDescriptor stdout = fds[0];
+        final ParcelFileDescriptor stdin = fds[1];
+        try (ParcelFileDescriptor.AutoCloseOutputStream output =
+                     new ParcelFileDescriptor.AutoCloseOutputStream(stdin)) {
+            final String cmd =
+                    "echo " + delay + " > /proc/sys/net/ipv4/neigh/" + mIfaceName
+                            + "/delay_first_probe_time";
+            output.write(cmd.getBytes());
+        }
+        // Setting a value to sysctl doesn't have any output.
+        final BufferedReader reader =
+                new BufferedReader(new FileReader(stdout.getFileDescriptor()));
+        assertNull(reader.readLine());
+
+        // Check if the sysctl "delay_first_probe_time" has updated.
+        final String delay_first_probe_time = getOneLineCommandOutput(
+                "su root cat /proc/sys/net/ipv4/neigh/" + mIfaceName
+                        + "/delay_first_probe_time");
+        assertEquals(delay, Integer.parseInt(delay_first_probe_time));
+    }
+
     private int getNeighborParameterUcastSolicit(String ifaceName) throws IOException {
         final String ucast_solicit = getOneLineCommandOutput(
-                "su root cat proc/sys/net/ipv6/neigh/" + ifaceName + "/ucast_solicit");
+                "su root cat /proc/sys/net/ipv6/neigh/" + ifaceName + "/ucast_solicit");
         return Integer.parseInt(ucast_solicit);
     }
 
@@ -1235,6 +1277,11 @@ public abstract class IpClientIntegrationTestCommon {
         mPacketReader.sendResponse(packet);
     }
 
+    private void sendGratuitousArp(MacAddress srcMac, Inet4Address targetIp) throws IOException {
+        sendArpReply(ETHER_BROADCAST /* dstMac */, srcMac.toByteArray() /* srcMac */, targetIp,
+                targetIp /* sender IP */);
+    }
+
     private void startIpClientProvisioning(final ProvisioningConfiguration cfg) throws Exception {
         mIIpClient.startProvisioning(cfg.toStableParcelable());
     }
@@ -1482,7 +1529,7 @@ public abstract class IpClientIntegrationTestCommon {
 
         if (shouldChangeMtu) {
             // Pretend that ConnectivityService set the MTU.
-            mNetd.interfaceSetMtu(mIfaceName, mtu);
+            NetlinkUtils.setInterfaceMtu(mIfaceName, mtu);
             assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), mtu);
         }
 
@@ -1496,12 +1543,9 @@ public abstract class IpClientIntegrationTestCommon {
         try {
             mIpc.shutdown();
             awaitIpClientShutdown();
-            if (shouldRemoveTestInterface) {
-                verify(mNetd, never()).interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
-            } else {
+            if (!shouldRemoveTestInterface) {
                 // Verify that MTU indeed has been restored or not.
-                verify(mNetd, times(shouldChangeMtu ? 1 : 0))
-                        .interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
+                assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_DEFAULT_MTU);
             }
             verifyAfterIpClientShutdown();
         } catch (Exception e) {
@@ -1975,15 +2019,6 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
-    public void testRestoreInitialInterfaceMtu_WithException() throws Exception {
-        doThrow(new RemoteException("NetdNativeService::interfaceSetMtu")).when(mNetd)
-                .interfaceSetMtu(mIfaceName, TEST_DEFAULT_MTU);
-
-        doRestoreInitialMtuTest(true /* shouldChangeMtu */, false /* shouldRemoveTestInterface */);
-        assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_MIN_MTU);
-    }
-
-    @Test @SignatureRequiredTest(reason = "TODO: evaluate whether signature perms are required")
     public void testRestoreInitialInterfaceMtu_NotFoundInterfaceWhenStopping() throws Exception {
         doRestoreInitialMtuTest(true /* shouldChangeMtu */, true /* shouldRemoveTestInterface */);
     }
@@ -2013,7 +2048,7 @@ public abstract class IpClientIntegrationTestCommon {
         assertIpMemoryStoreNetworkAttributes(TEST_LEASE_DURATION_S, currentTime, TEST_MIN_MTU);
 
         // Pretend that ConnectivityService set the MTU.
-        mNetd.interfaceSetMtu(mIfaceName, TEST_MIN_MTU);
+        NetlinkUtils.setInterfaceMtu(mIfaceName, TEST_MIN_MTU);
         assertEquals(NetworkInterface.getByName(mIfaceName).getMTU(), TEST_MIN_MTU);
 
         reset(mCb);
@@ -4314,7 +4349,47 @@ public abstract class IpClientIntegrationTestCommon {
                 NudEventType.NUD_POST_ROAMING_MAC_ADDRESS_CHANGED);
     }
 
-    private void prepareIpReachabilityMonitorIpv4AddressResolutionTest() throws Exception {
+    private ArpPacket expectAndRespondToArpRequest(MacAddress srcMac,
+            Inet4Address targetIp) throws Exception {
+        final ArpPacket request = getNextArpPacket();
+        assertArpRequest(request, targetIp);
+        sendArpReply(request.senderHwAddress.toByteArray() /* dst */, srcMac.toByteArray(),
+                request.senderIp /* target IP */, targetIp /* sender IP */);
+        return request;
+    }
+
+    /**
+     * A function helper to set up the steps to verify NUD (neighbor unreachable detection) probes
+     * for IPv4 hosts. This function helper intends to respond to the ARP probes for the default
+     * gateway during address resolution if the param shouldMakeNeighborReachableFirst is true,
+     * which makes the default gateway reachable first, and then sending a gratuitous ARP with a
+     * different mac address, it will override the ARP entry on the tap interface, as a result, it
+     * should do the address resolution again. The param shouldMakeNeighborReachableFirst depends on
+     * the specific test case.
+     *
+     * If a specific test case expectes to see an NUD failure after that, then it should not respond
+     * to any upcoming ARP probes. The packet order example as below,
+     *
+     * 37  0.0.0.0        255.255.255.255  DHCP  338   DHCP Discover - Transaction ID 0xf367c95c
+     * 38  192.168.1.100  192.168.1.2      DHCP  360   DHCP ACK      - Transaction ID 0xf367c95c
+     *
+     * 45  66:64:50:87:c3:22  ARP  48  Who has 192.168.1.100? Tell 192.168.1.2
+     * 46  Google_22:33:44    ARP  48  192.168.1.100 is at 00:1a:11:22:33:44
+     * 47  192.168.1.2  192.168.1.100  UDP  148  47467 1234 Len=100
+     *
+     * 76  Google_22:33:55  ARP  48   Gratuitous ARP for 192.168.1.100 (Reply) (duplicate use of 192.168.1.100 detected!)
+     * 77  192.168.1.2  192.168.1.100  UDP  148  38374  1234 Len=100
+     *
+     * 92  66:64:50:87:c3:22  ARP  48  Who has 192.168.1.100? Tell 192.168.1.2
+     * 93  66:64:50:87:c3:22  ARP  48  Who has 192.168.1.100? Tell 192.168.1.2
+     * ...
+     * 116 66:64:50:87:c3:22  ARP  48  Who has 192.168.1.100? Tell 192.168.1.2
+     */
+    private void prepareIpReachabilityMonitorIpv4AddressResolutionTest(
+            boolean shouldMakeNeighborReachableFirst) throws Exception {
+        // Reduce the delay first probe time from 5s to 2s, speed up the test duration and we can
+        // still use PACKET_TIMEOUT_MS to wait for the next upcoming ARP packet.
+        setNudDelayFirstProbeTime(TEST_DELAY_FIRST_PROBE_TIME_S);
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
         mNetworkAgentThread.start();
@@ -4333,17 +4408,35 @@ public abstract class IpClientIntegrationTestCommon {
 
         runAsShell(MANAGE_TEST_NETWORKS, () -> createTestNetworkAgentAndRegister(lp));
 
-        // Send a UDP packet to IPv4 DNS server to trigger address resolution process for IPv4
-        // on-link DNS server or default router.
-        final Random random = new Random();
-        final byte[] data = new byte[100];
-        random.nextBytes(data);
-        sendUdpPacketToNetwork(mNetworkAgent.getNetwork(), SERVER_ADDR, 1234 /* port */, data);
+        // Send a UDP packet to IPv4 on-link DNS server to trigger address resolution process for
+        // the default gateway, respond to the broadcast ARP probe and make the default gateway as
+        // reachable.
+        sendPacketToPeer(SERVER_ADDR);
+        if (shouldMakeNeighborReachableFirst) {
+            final ArpPacket request = expectAndRespondToArpRequest(ROUTER_MAC, SERVER_ADDR);
+            assertNotNull(request);
+            verifyRestoringNeighborParametersToSteadyState();
+
+            // Wait the locktime expires then we are able to override ARP entry by sending a
+            // gratuitous ARP with a different MAC address, see locktime sysctl on
+            // https://man7.org/linux/man-pages/man7/arp.7.html.
+            Thread.sleep(TEST_ARP_LOCKTIME_MS);
+
+            // Send a gratuitous ARP to override the default gateway MAC address, this makes the
+            // default gateway become stale in the ARP entry, sending another UDP packet to the
+            // default gateway make it transit to DELAY state. If no reachability confirmation is
+            // received within DELAY_FIRST_PROBE_TIME seconds of entering the DELAY state, kernel
+            // goes to PROBE state and start probing, see RFC 4861 section 7.3.2.
+            final MacAddress newMac = MacAddress.fromString("00:1A:11:22:33:55");
+            sendGratuitousArp(newMac, SERVER_ADDR);
+            sendPacketToPeer(SERVER_ADDR);
+        }
     }
 
     private void doTestIpReachabilityMonitor_replyBroadcastArpRequestWithDiffMacAddresses(
             boolean disconnect) throws Exception {
-        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest(
+                false /* shouldMakeNeighborReachableFirst */);
 
         // Respond to the broadcast ARP request.
         final ArpPacket request = getNextArpPacket();
@@ -4351,7 +4444,7 @@ public abstract class IpClientIntegrationTestCommon {
         sendArpReply(request.senderHwAddress.toByteArray() /* dst */, ROUTER_MAC_BYTES /* srcMac */,
                 request.senderIp /* target IP */, SERVER_ADDR /* sender IP */);
 
-        Thread.sleep(1500);
+        Thread.sleep(TEST_ARP_LOCKTIME_MS);
 
         // Reply with a different MAC address but the same server IP.
         final MacAddress gateway = MacAddress.fromString("00:11:22:33:44:55");
@@ -4389,7 +4482,9 @@ public abstract class IpClientIntegrationTestCommon {
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = true)
     public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure()
             throws Exception {
-        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest(
+                true /* shouldMakeNeighborReachableFirst */
+        );
 
         ArpPacket packet;
         while ((packet = getNextArpPacket(TEST_TIMEOUT_MS)) != null) {
@@ -4399,14 +4494,14 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION, enabled = false)
     @Flag(name = IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION, enabled = false)
     public void testIpReachabilityMonitor_ignoreIpv4DefaultRouterOrganicNudFailure_flagoff()
             throws Exception {
-        prepareIpReachabilityMonitorIpv4AddressResolutionTest();
+        prepareIpReachabilityMonitorIpv4AddressResolutionTest(
+                true /* shouldMakeNeighborReachableFirst */);
 
         ArpPacket packet;
-        while ((packet = getNextArpPacket(TEST_TIMEOUT_MS)) != null) {
+        while ((packet = getNextArpPacket(PACKET_TIMEOUT_MS)) != null) {
             // wait address resolution to complete.
         }
         final ArgumentCaptor<ReachabilityLossInfoParcelable> lossInfoCaptor =
