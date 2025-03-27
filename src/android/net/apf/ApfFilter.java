@@ -423,6 +423,12 @@ public class ApfFilter {
     private final MulticastReportMonitor mMulticastReportMonitor;
     private final ApfMdnsOffloadEngine mApfMdnsOffloadEngine;
     private final List<MdnsOffloadRule> mOffloadRules = new ArrayList<>();
+    // The number of mDNS rules requiring APF to transmit a reply and drop the query packet. A
+    // value of -1 means all mDNS query packets should be passed; no mDNS query packets will trigger
+    // the transmit and reply logic.
+    private int mNumOfMdnsRuleToOffload = -1;
+
+    private int mOverEstimatedProgramSize = 0;
 
     private static boolean isDeviceIdleModeChangedAction(Intent intent) {
         return ACTION_DEVICE_IDLE_MODE_CHANGED.equals(intent.getAction());
@@ -926,6 +932,7 @@ public class ApfFilter {
             this.min = min;
         }
 
+        @Override
         public String toString() {
             if (type == Type.LIFETIME) {
                 return String.format("%s: (%d, %d) %d %d", type, start, length, lifetime, min);
@@ -947,11 +954,11 @@ public class ApfFilter {
         // Router lifetime in packet
         private final int mRouterLifetime;
         // Minimum valid lifetime of PIOs in packet, Long.MAX_VALUE means not seen.
-        private long mMinPioValidLifetime = Long.MAX_VALUE;
+        private final long mMinPioValidLifetime;
         // Minimum route lifetime of RIOs in packet, Long.MAX_VALUE means not seen.
-        private long mMinRioRouteLifetime = Long.MAX_VALUE;
+        private final long mMinRioRouteLifetime;
         // Minimum lifetime of RDNSSs in packet, Long.MAX_VALUE means not seen.
-        private long mMinRdnssLifetime = Long.MAX_VALUE;
+        private final long mMinRdnssLifetime;
         // The time in seconds in which some of the information contained in this RA expires.
         private final int mExpirationTime;
         // When the packet was last captured, in seconds since Unix Epoch
@@ -1037,6 +1044,7 @@ public class ApfFilter {
             sb.append("/").append(prefixLen).append(" ");
         }
 
+        @Override
         public String toString() {
             try {
                 StringBuffer sb = new StringBuffer();
@@ -1141,34 +1149,6 @@ public class ApfFilter {
             return lifetime;
         }
 
-        /**
-         * Return the router lifetime of the RA
-         */
-        public int routerLifetime() {
-            return mRouterLifetime;
-        }
-
-        /**
-         * Return the minimum valid lifetime in PIOs
-         */
-        public long minPioValidLifetime() {
-            return mMinPioValidLifetime;
-        }
-
-        /**
-         * Return the minimum route lifetime in RIOs
-         */
-        public long minRioRouteLifetime() {
-            return mMinRioRouteLifetime;
-        }
-
-        /**
-         * Return the minimum lifetime in RDNSSs
-         */
-        public long minRdnssLifetime() {
-            return mMinRdnssLifetime;
-        }
-
         // Note that this parses RA and may throw InvalidRaException (from
         // Buffer.position(int) or due to an invalid-length option) or IndexOutOfBoundsException
         // (from ByteBuffer.get(int) ) if parsing encounters something non-compliant with
@@ -1214,6 +1194,10 @@ public class ApfFilter {
             // Add remaining fields (reachable time and retransmission timer) to match section.
             addMatchUntil(ICMP6_RA_OPTION_OFFSET);
 
+            long minPioValidLifetime = Long.MAX_VALUE;
+            long minRioRouteLifetime = Long.MAX_VALUE;
+            long minRdnssLifetime = Long.MAX_VALUE;
+
             while (mPacket.hasRemaining()) {
                 final int position = mPacket.position();
                 final int optionType = getUint8(mPacket, position);
@@ -1233,8 +1217,8 @@ public class ApfFilter {
                         lifetime = getUint32(mPacket, mPacket.position());
                         addLifetimeSection(ICMP6_PREFIX_OPTION_VALID_LIFETIME_LEN,
                                 lifetime, mAcceptRaMinLft);
-                        mMinPioValidLifetime = getMinForPositiveValue(
-                                mMinPioValidLifetime, lifetime);
+                        minPioValidLifetime = getMinForPositiveValue(
+                                minPioValidLifetime, lifetime);
                         if (lifetime == 0) mNumZeroLifetimeRas++;
 
                         // Parse preferred lifetime
@@ -1252,14 +1236,14 @@ public class ApfFilter {
                     case ICMP6_RDNSS_OPTION_TYPE:
                         mRdnssOptionOffsets.add(position);
                         lifetime = add4ByteLifetimeOption(optionLength, mMinRdnssLifetimeSec, true);
-                        mMinRdnssLifetime = getMinForPositiveValue(mMinRdnssLifetime, lifetime);
+                        minRdnssLifetime = getMinForPositiveValue(minRdnssLifetime, lifetime);
                         if (lifetime == 0) mNumZeroLifetimeRas++;
                         break;
                     case ICMP6_ROUTE_INFO_OPTION_TYPE:
                         mRioOptionOffsets.add(position);
                         lifetime = add4ByteLifetimeOption(optionLength, mAcceptRaMinLft, false);
-                        mMinRioRouteLifetime = getMinForPositiveValue(
-                                mMinRioRouteLifetime, lifetime);
+                        minRioRouteLifetime = getMinForPositiveValue(
+                                minRioRouteLifetime, lifetime);
                         if (lifetime == 0) mNumZeroLifetimeRas++;
                         break;
                     case ICMP6_SOURCE_LL_ADDRESS_OPTION_TYPE:
@@ -1280,6 +1264,10 @@ public class ApfFilter {
                         break;
                 }
             }
+
+            mMinPioValidLifetime = minPioValidLifetime;
+            mMinRioRouteLifetime = minRioRouteLifetime;
+            mMinRdnssLifetime = minRdnssLifetime;
             mExpirationTime = getExpirationTime();
         }
 
@@ -1597,6 +1585,7 @@ public class ApfFilter {
             gen.defineLabel(nextFilterLabel);
         }
 
+        @Override
         public String toString() {
             try {
                 return String.format("%s -> %s",
@@ -1652,6 +1641,7 @@ public class ApfFilter {
             return fp.array();
         }
 
+        @Override
         public String toString() {
             try {
                 return String.format("%s -> %s , seq=%d, ack=%d",
@@ -2049,8 +2039,12 @@ public class ApfFilter {
         // (APFv6+ specific logic)
         // if it's mDNS:
         //   if it's a query:
-        //     if the query matches one of the offload rules:
+        //     if mNumOfMdnsRuleToOffload == -1:
+        //       pass
+        //     if the query matches one of the offload rules from idx [0, mNumOfMdnsRuleToOffload):
         //       transmit mDNS reply and drop
+        //     else if query matches one of the rest of the offload rules:
+        //       pass
         //     else if filtering multicast (i.e. multicast lock not held):
         //       drop
         //     else
@@ -2587,8 +2581,12 @@ public class ApfFilter {
         // (APFv6+ specific logic)
         // if it's mDNS:
         //   if it's a query:
-        //     if the query matches one of the offload rules:
+        //     if mNumOfMdnsRuleToOffload == -1:
+        //       pass
+        //     if the query matches one of the offload rules from idx [0, mNumOfMdnsRuleToOffload):
         //       transmit mDNS reply and drop
+        //     else if query matches one of the rest of the offload rules:
+        //       pass
         //     else if filtering multicast (i.e. multicast lock not held):
         //       drop
         //     else
@@ -2658,6 +2656,7 @@ public class ApfFilter {
 
         if (enableMdns6Offload()) {
             generateIPv6MdnsFilter((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload);
+            gen.addLoad8intoR0(IPV6_NEXT_HEADER_OFFSET);
         }
 
         // Drop multicast if the multicast filter is enabled.
@@ -3101,22 +3100,26 @@ public class ApfFilter {
     private void generateMldV1ReportTransmit(ApfV6GeneratorBase<?> gen,
             byte[] mldPktFromEthSrcToIpv6Vtf, byte[] mldPktFromIpv6NextHdrToSrc)
             throws IllegalInstructionException {
-        // Reuse MLDv2 packet chunks when creating the MLDv1 report listed below:
-        //   - from Ethernet source to IPv6 VTF: 12 bytes
-        //   - from IPv6 next header to source address: 18 bytes
         final int packetSize =
                 ETHER_HEADER_LEN
                 + IPV6_HEADER_LEN
                 + IPV6_MLD_HOPOPTS.length
                 + IPV6_MLD_V1_MESSAGE_SIZE;
+        final int mldV1Ipv6PayloadLength = IPV6_MLD_HOPOPTS.length + IPV6_MLD_V1_MESSAGE_SIZE;
+        final byte[] mldV1PktFromEthSrcToIpv6Src =  CollectionUtils.concatArrays(
+                mldPktFromEthSrcToIpv6Vtf,
+                new byte[] {
+                        (byte) ((mldV1Ipv6PayloadLength >> 8) & 0xff),
+                        (byte) (mldV1Ipv6PayloadLength & 0xff),
+                },
+                mldPktFromIpv6NextHdrToSrc
+        );
         for (Inet6Address mcastAddr: mIPv6McastAddrsExcludeAllHost) {
             final MacAddress mcastEther =
                     NetworkStackUtils.ipv6MulticastToEthernetMulticast(mcastAddr);
             gen.addAllocate(packetSize)
                     .addDataCopy(mcastEther.toByteArray())
-                    .addDataCopy(mldPktFromEthSrcToIpv6Vtf)
-                    .addWriteU16(IPV6_MLD_HOPOPTS.length + IPV6_MLD_V1_MESSAGE_SIZE)
-                    .addDataCopy(mldPktFromIpv6NextHdrToSrc)
+                    .addDataCopy(mldV1PktFromEthSrcToIpv6Src)
                     .addDataCopy(mcastAddr.getAddress())
                     .addDataCopy(IPV6_MLD_HOPOPTS)
                     .addDataCopy(createMldV1ReportMessage(mcastAddr))
@@ -3143,25 +3146,45 @@ public class ApfFilter {
     private void generateMldV2ReportTransmit(ApfV6GeneratorBase<?> gen,
             byte[] mldPktFromEthSrcToIpv6Vtf, byte[] mldPktFromIpv6NextHdrToSrc)
             throws IllegalInstructionException {
+        final int mldV1Ipv6PayloadLength = IPV6_MLD_HOPOPTS.length + IPV6_MLD_V1_MESSAGE_SIZE;
+        final byte[] encodedMldV1Ipv6PayloadLength = {
+            (byte) ((mldV1Ipv6PayloadLength >> 8) & 0xff), (byte) (mldV1Ipv6PayloadLength & 0xff),
+        };
+        // We place template packet chunks in the data region first to reduce the number of
+        // instructions needed for creating multiple MLDv1 reports.
+        // The following packet chunks can be used for creating both MLDv1 and MLDv2 reports:
+        //   - from Ethernet source to IPv6 VTF: 12 bytes
+        //   - from IPv6 next header to source address: 18 bytes
+        final byte[] mldV2ReportPayload = createMldV2ReportPayload();
+        final byte[] template = CollectionUtils.concatArrays(
+            ETH_MULTICAST_MLD_V2_ALL_MULTICAST_ROUTERS_ADDRESS,
+            mldPktFromEthSrcToIpv6Vtf,
+            encodedMldV1Ipv6PayloadLength,
+            mldPktFromIpv6NextHdrToSrc,
+            IPV6_MLD_V2_ALL_ROUTERS_MULTICAST_ADDRESS,
+            IPV6_MLD_HOPOPTS,
+            mldV2ReportPayload
+        );
+        gen.maybeUpdateDataRegion(template);
+
+        final byte[] mldV2PktFromEthDstToIpv6Vtf = CollectionUtils.concatArrays(
+                ETH_MULTICAST_MLD_V2_ALL_MULTICAST_ROUTERS_ADDRESS,
+                mldPktFromEthSrcToIpv6Vtf
+        );
+        final byte[] mldV2PktFromIpv6NextHdrToEnd = CollectionUtils.concatArrays(
+                mldPktFromIpv6NextHdrToSrc,
+                IPV6_MLD_V2_ALL_ROUTERS_MULTICAST_ADDRESS,
+                IPV6_MLD_HOPOPTS,
+                mldV2ReportPayload
+        );
         final int mcastAddrsNum = mIPv6McastAddrsExcludeAllHost.size();
         final int ipv6PayloadLength = IPV6_MLD_HOPOPTS.length
                 + IPV6_MLD_MESSAGE_MIN_SIZE
                 + (mcastAddrsNum * IPV6_MLD_V2_MULTICAST_ADDRESS_RECORD_SIZE);
-        final byte[] encodedIPv6PayloadLength = {
-            (byte) ((ipv6PayloadLength >> 8) & 0xff), (byte) (ipv6PayloadLength & 0xff),
-        };
-        final byte[] packet = CollectionUtils.concatArrays(
-            ETH_MULTICAST_MLD_V2_ALL_MULTICAST_ROUTERS_ADDRESS,
-            mldPktFromEthSrcToIpv6Vtf,
-            encodedIPv6PayloadLength,
-            mldPktFromIpv6NextHdrToSrc,
-            IPV6_MLD_V2_ALL_ROUTERS_MULTICAST_ADDRESS,
-            IPV6_MLD_HOPOPTS,
-            createMldV2ReportPayload()
-        );
-
         gen.addAllocate(ETHER_HEADER_LEN + IPV6_HEADER_LEN + ipv6PayloadLength)
-            .addDataCopy(packet)
+            .addDataCopy(mldV2PktFromEthDstToIpv6Vtf)
+            .addWriteU16(ipv6PayloadLength)
+            .addDataCopy(mldV2PktFromIpv6NextHdrToEnd)
             .addTransmitL4(
                 // ip_ofs
                 ETHER_HEADER_LEN,
@@ -3371,15 +3394,16 @@ public class ApfFilter {
      * @param labelCheckMdnsQueryPayload the label to jump to for checking the mDNS query payload
      */
     private void generateMdnsQueryOffload(ApfV6GeneratorBase<?> gen,
-            short labelCheckMdnsQueryPayload)
+            short labelCheckMdnsQueryPayload, int numOfMdnsRuleToOffload)
             throws IllegalInstructionException {
         // The mDNS payload check logic is terminal; the program will always result in either
         // PASS or DROP.
         gen.defineLabel(labelCheckMdnsQueryPayload);
-        // TODO: Implement failover logic for insufficient APF RAM to offload all records. When
-        //  APF RAM is not enough, rules with lower priority should be transitioned to passthrough
-        //  mode (e.g., if a QNAME matches, the packet should be passed). If RAM remains
-        //  insufficient even with all rules in passthrough mode, the mDNS filter should fail open.
+
+        if (numOfMdnsRuleToOffload == -1) {
+            gen.addCountAndPass(PASSED_MDNS);
+            return;
+        }
 
         // Set R0 to the offset of the beginning of the UDP payload (the DNS header)
         gen.addSwap();
@@ -3391,7 +3415,8 @@ public class ApfFilter {
         final byte[] mdns6EthDstToFlowLabel = createMdns6PktFromEthDstToIPv6FlowLabel(enableMdns6);
         final byte[] mdns6NextHdrToUdpDport = createMdns6PktFromIPv6NextHdrToUdpDport(enableMdns6);
 
-        for (MdnsOffloadRule rule : mOffloadRules) {
+        for (int i = 0; i < mOffloadRules.size(); i++) {
+            final MdnsOffloadRule rule = mOffloadRules.get(i);
             final short ruleNotMatch = gen.getUniqueLabel();
             final short ruleMatch = gen.getUniqueLabel();
             final short offloadIPv6Mdns = gen.getUniqueLabel();
@@ -3409,7 +3434,9 @@ public class ApfFilter {
             gen.defineLabel(ruleMatch);
 
             // If there is no offload payload, pass the packet to let NsdService handle it.
-            if (rule.mOffloadPayload == null) {
+            // If there isn't enough space to offload all rules, packets should be processed
+            // by iterating through the rules, starting with the lowest priority.
+            if (rule.mOffloadPayload == null || i >= numOfMdnsRuleToOffload) {
                 gen.addCountAndPass(PASSED_MDNS);
             } else {
                 if (enableMdns4 && enableMdns6) {
@@ -3602,21 +3629,6 @@ public class ApfFilter {
         generateIPv6Filter(gen, labelCheckMdnsQueryPayload);
     }
 
-    /**
-     * Append packet counting epilogue to the APF program.
-     * <p>
-     * Currently, the epilogue consists of two trampolines which count passed and dropped packets
-     * before jumping to the actual PASS and DROP labels.
-     */
-    private void emitEpilogue(ApfV4GeneratorBase<?> gen) throws IllegalInstructionException {
-        // Execution will reach here if none of the filters match, which will pass the packet to
-        // the application processor.
-        gen.addCountAndPass(PASSED_IPV6_ICMP);
-
-        // TODO: merge the addCountTrampoline() into generate() method
-        gen.addCountTrampoline();
-    }
-
     private String getApfConfigMessage() {
         final StringBuilder sb = new StringBuilder();
         sb.append("{ ");
@@ -3667,13 +3679,30 @@ public class ApfFilter {
     }
 
     private ApfV4GeneratorBase<?> createApfGenerator() throws IllegalInstructionException {
-        if (useApfV6Generator()) {
+        if (useApfV61Generator()) {
+            return new ApfV61Generator(mApfVersionSupported, mApfRamSize,
+                    mInstallableProgramSizeClamp);
+        } else if (useApfV6Generator()) {
             return new ApfV6Generator(mApfVersionSupported, mApfRamSize,
                     mInstallableProgramSizeClamp);
         } else {
             return new ApfV4Generator(mApfVersionSupported, mApfRamSize,
                     mInstallableProgramSizeClamp);
         }
+    }
+
+    @VisibleForTesting
+    public int getOverEstimatedProgramSize() {
+        return mOverEstimatedProgramSize;
+    }
+
+    private int calcMdnsOffloadProgramSizeOverEstimate(int numOfMdnsRuleToOffload)
+            throws IllegalInstructionException {
+        ApfV6GeneratorBase<?> gen = (ApfV6GeneratorBase<?>) createApfGenerator();
+        short tmpLabelCheckMdnsQueryPayload = gen.getUniqueLabel();
+        generateMdnsQueryOffload(gen, tmpLabelCheckMdnsQueryPayload,
+                numOfMdnsRuleToOffload);
+        return gen.programLengthOverEstimate() - gen.getBaseProgramSize();
     }
 
     /**
@@ -3695,28 +3724,69 @@ public class ApfFilter {
         mNumProgramUpdates++;
 
         try {
-            // Step 1: Determine how many RA filters we can fit in the program.
-
+            // Step 1: Determine how many RA filters/mDNS offloads we can fit in the program.
             ApfV4GeneratorBase<?> gen = createApfGenerator();
             short labelCheckMdnsQueryPayload = gen.getUniqueLabel();
 
             emitPrologue(gen, labelCheckMdnsQueryPayload);
 
-            // The epilogue normally goes after the RA filters, but add it early to include its
-            // length when estimating the total.
-            emitEpilogue(gen);
+            // The default packet handling normally goes after the RA filters, but add it early to
+            // include its length when estimating the total.
+            gen.addDefaultPacketHandling();
 
-            if (enableMdns4Offload() || enableMdns6Offload()) {
-                generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload);
-            }
-
-            // Can't fit the program even without any RA filters?
+            // Can't fit the program even without any RA filters/Mdns offloads?
             if (gen.programLengthOverEstimate() > mMaximumApfProgramSize) {
                 Log.e(TAG, "Program exceeds maximum size " + mMaximumApfProgramSize);
                 sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
                 installPacketFilter(new byte[mMaximumApfProgramSize],
                         getApfConfigMessage() + " (clear memory, reason: program too large)");
                 return;
+            }
+
+            // We attempt to fit the mDNS offload rules into the program before fitting RAs. The
+            // strategy is as follows:
+            // 1. If sufficient memory is available, offload all rules.
+            // 2. If memory is insufficient, switch low-priority rules to passthrough mode.
+            // 3. If memory remains insufficient after all rules are switched to passthrough
+            // mode, fail open to pass all mDNS packets.
+            //
+            // We prioritize mDNS offload over RA filters because:
+            // 1. We plan to move away from the multicast lock API, making mDNS offload critical
+            // for the application's proper function. Without it, app developers would likely
+            // still use the multicast lock, which would wake the device for almost all
+            // multicast traffic, leading to serious power problems.
+            // 2. For devices like TVs, reliable mDNS offload is key to meeting EU power regulation
+            // requirement. These devices are usually on home networks with very chatty mDNS
+            // traffic.
+            if (enableMdns4Offload() || enableMdns6Offload()) {
+                final int remainSize = mMaximumApfProgramSize - gen.programLengthOverEstimate();
+                mNumOfMdnsRuleToOffload = mOffloadRules.size();
+                for (; mNumOfMdnsRuleToOffload >= -1; --mNumOfMdnsRuleToOffload) {
+                    int programSize = calcMdnsOffloadProgramSizeOverEstimate(
+                            mNumOfMdnsRuleToOffload);
+                    if (programSize <= remainSize) {
+                        break;
+                    }
+                }
+
+                // When the size of offload rules is non-zero, at bare minimum, the
+                // program should be pass the mDNS packets. Otherwise, the application use case will
+                // be broken after we migrate away from multicast lock.
+                // If the remaining size is insufficient for mDNS fail-open, we should fail-open
+                // for the entire program.
+                if (mNumOfMdnsRuleToOffload < -1) {
+                    Log.e(TAG, "Program exceeds maximum size (unable to fail-open for mDNS)  "
+                            + mMaximumApfProgramSize);
+                    sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
+                    installPacketFilter(new byte[mMaximumApfProgramSize], getApfConfigMessage()
+                            + " (clear memory, reason: unable to fail-open for mDNS)");
+                    return;
+                }
+
+                generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload,
+                        mNumOfMdnsRuleToOffload);
+            } else {
+                mNumOfMdnsRuleToOffload = -1;
             }
 
             for (Ra ra : mRas) {
@@ -3741,10 +3811,12 @@ public class ApfFilter {
                 ra.generateFilter(gen, timeSeconds);
                 programMinLft = Math.min(programMinLft, ra.getRemainingFilterLft(timeSeconds));
             }
-            emitEpilogue(gen);
+            gen.addDefaultPacketHandling();
             if (enableMdns4Offload() || enableMdns6Offload()) {
-                generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload);
+                generateMdnsQueryOffload((ApfV6GeneratorBase<?>) gen, labelCheckMdnsQueryPayload,
+                        mNumOfMdnsRuleToOffload);
             }
+            mOverEstimatedProgramSize = gen.programLengthOverEstimate();
             program = gen.generate();
         } catch (IllegalInstructionException | IllegalStateException | IllegalArgumentException e) {
             Log.wtf(TAG, "Failed to generate APF program.", e);
@@ -3755,6 +3827,16 @@ public class ApfFilter {
             return;
         }
         if (mIsRunning) {
+            if (program.length > mMaximumApfProgramSize) {
+                Log.wtf(TAG, String.format(
+                        "Size estimation logic is wrong: final program size: %d exceeds maximum "
+                                + "size: %d. ",
+                        program.length, mMaximumApfProgramSize));
+                sendNetworkQuirkMetrics(NetworkQuirkEvent.QE_APF_OVER_SIZE_FAILURE);
+                installPacketFilter(new byte[mMaximumApfProgramSize],
+                        getApfConfigMessage() + " (clear memory, reason: wrong size estimation)");
+                return;
+            }
             installPacketFilter(program, getApfConfigMessage());
         }
         mLastInstalledProgramMinLifetime = programMinLft;
@@ -3798,13 +3880,13 @@ public class ApfFilter {
 
         // Update info for Metrics
         mLowestRouterLifetimeSeconds = getMinForPositiveValue(
-                mLowestRouterLifetimeSeconds, ra.routerLifetime());
+                mLowestRouterLifetimeSeconds, ra.mRouterLifetime);
         mLowestPioValidLifetimeSeconds = getMinForPositiveValue(
-                mLowestPioValidLifetimeSeconds, ra.minPioValidLifetime());
+                mLowestPioValidLifetimeSeconds, ra.mMinPioValidLifetime);
         mLowestRioRouteLifetimeSeconds = getMinForPositiveValue(
-                mLowestRioRouteLifetimeSeconds, ra.minRioRouteLifetime());
+                mLowestRioRouteLifetimeSeconds, ra.mMinRioRouteLifetime);
         mLowestRdnssLifetimeSeconds = getMinForPositiveValue(
-                mLowestRdnssLifetimeSeconds, ra.minRdnssLifetime());
+                mLowestRdnssLifetimeSeconds, ra.mMinRdnssLifetime);
 
         // Remove all expired RA filters before trying to match the new RA.
         // TODO: matches() still checks that the old RA filter has not expired. Consider removing
@@ -4120,6 +4202,11 @@ public class ApfFilter {
         return SdkLevel.isAtLeastV() && ApfV6Generator.supportsVersion(mApfVersionSupported);
     }
 
+    @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
+    private boolean useApfV61Generator() {
+        return SdkLevel.isAtLeastV() && ApfV61Generator.supportsVersion(mApfVersionSupported);
+    }
+
     /**
      * Add TCP keepalive ack packet filter.
      * This will add a filter to drop acks to the keepalive packet passed as an argument.
@@ -4262,10 +4349,19 @@ public class ApfFilter {
         pw.println();
         pw.println("Mdns filters:");
         pw.increaseIndent();
-        for (MdnsOffloadRule rule : mOffloadRules) {
-            pw.println(
-                    String.format("offloaded service: %s, payloadSize: %d", rule.mFullServiceName,
+        if (mNumOfMdnsRuleToOffload == -1) {
+            pw.println("pass all mDNS packet");
+        } else {
+            for (int i = 0; i < mOffloadRules.size(); ++i) {
+                final MdnsOffloadRule rule = mOffloadRules.get(i);
+                if (i >= mNumOfMdnsRuleToOffload) {
+                    pw.println(String.format("passthrough service: %s", rule.mFullServiceName));
+                } else {
+                    pw.println(String.format("offload service: %s, payloadSize: %d",
+                            rule.mFullServiceName,
                             rule.mOffloadPayload == null ? 0 : rule.mOffloadPayload.length));
+                }
+            }
         }
         pw.decreaseIndent();
         pw.println();
