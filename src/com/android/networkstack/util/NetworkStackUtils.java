@@ -201,20 +201,6 @@ public class NetworkStackUtils {
             "ip_reachability_mcast_resolicit_version";
 
     /**
-     * Experiment flag to attempt to ignore the on-link IPv6 DNS server which fails to respond to
-     * address resolution.
-     */
-    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DNS_SERVER_VERSION =
-            "ip_reachability_ignore_incompleted_ipv6_dns_server_version";
-
-    /**
-     * Experiment flag to attempt to ignore the IPv6 default router which fails to respond to
-     * address resolution.
-     */
-    public static final String IP_REACHABILITY_IGNORE_INCOMPLETE_IPV6_DEFAULT_ROUTER_VERSION =
-            "ip_reachability_ignore_incompleted_ipv6_default_router_version";
-
-    /**
      * Experiment flag to treat router MAC address changes as a failure only on roam.
      */
     public static final String IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION =
@@ -225,19 +211,6 @@ public class NetworkStackUtils {
      */
     public static final String IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION =
             "ip_reachability_ignore_organic_nud_failure_version";
-
-    /**
-     * Experiment flag to ignore all NUD failures from the neighbor that has never ever entered the
-     * reachable state.
-     */
-    public static final String IP_REACHABILITY_IGNORE_NEVER_REACHABLE_NEIGHBOR_VERSION =
-            "ip_reachability_ignore_never_reachable_neighbor_version";
-
-    /**
-     * Experiment flag to enable DHCPv6 Prefix Delegation(RFC8415) in IpClient.
-     */
-    public static final String IPCLIENT_DHCPV6_PREFIX_DELEGATION_VERSION =
-            "ipclient_dhcpv6_prefix_delegation_version";
 
     /**
      * Experiment flag to enable the feature of polling counters in Apf.
