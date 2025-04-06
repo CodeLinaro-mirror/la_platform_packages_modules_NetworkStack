@@ -55,6 +55,13 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     }
 
     @Override
+    public final int getBaseProgramSize() {
+        // When the APFv6+ generator is initialized, it always adds a 3-byte data jump
+        // instruction and a 4-byte exception instruction to the front of the program.
+        return 7;
+    }
+
+    @Override
     void updateExceptionBufferSize(int programSize) throws IllegalInstructionException {
         mInstructions.get(1).updateExceptionBufferSize(
                 mRamSize - ApfCounterTracker.Counter.totalSize() - programSize);
@@ -107,10 +114,7 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      *
      * @param size the buffer length to be allocated.
      */
-    public final Type addAllocate(int size) {
-        // Rbit1 means the extra be16 immediate is present
-        return append(new Instruction(ExtendedOpcodes.ALLOCATE, Rbit1).addU16(size));
-    }
+    public abstract Type addAllocate(int size);
 
     /**
      * Add an instruction to the beginning of the program to reserve the empty data region.
@@ -146,9 +150,7 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * Add an instruction to the end of the program to transmit the allocated buffer without
      * checksum.
      */
-    public final Type addTransmitWithoutChecksum() {
-        return addTransmit(-1 /* ipOfs */);
-    }
+    public abstract Type addTransmitWithoutChecksum();
 
     /**
      * Add an instruction to the end of the program to transmit the allocated buffer.
@@ -160,6 +162,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         if (ipOfs == -1) ipOfs = 255;
         return append(new Instruction(ExtendedOpcodes.TRANSMIT, Rbit0).addU8(ipOfs).addU8(255));
     }
+
+    protected abstract boolean handleOptimizedTransmit(int ipOfs, int csumOfs, int csumStart, int partialCsum, boolean isUdp);
 
     /**
      * Add an instruction to the end of the program to transmit the allocated buffer.
@@ -174,6 +178,8 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
             throw new IllegalArgumentException("L4 checksum requires csum offset of "
                                                + csumOfs + " < 255");
         }
+        if (handleOptimizedTransmit(ipOfs, csumOfs, csumStart, partialCsum, isUdp))
+            return self();
         return append(new Instruction(ExtendedOpcodes.TRANSMIT, isUdp ? Rbit1 : Rbit0)
                 .addU8(ipOfs).addU8(csumOfs).addU8(csumStart).addU16(partialCsum));
     }
@@ -266,6 +272,18 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
                     toIndex);
             addDataCopy(copySrc, (toIndex - fromIndex));
         }
+        return self();
+    }
+
+    /**
+     * Add the content to the data region if it wasn't exist.
+     */
+    public final Type maybeUpdateDataRegion(@NonNull byte[] content)
+            throws IllegalInstructionException {
+        if (mInstructions.isEmpty()) {
+            throw new IllegalInstructionException("There are no instructions");
+        }
+        mInstructions.get(0).maybeUpdateBytesImm(content, 0, content.length);
         return self();
     }
 
@@ -367,6 +385,54 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         return append(new Instruction(ExtendedOpcodes.JDNSQMATCHSAFE, Rbit0).setTargetLabel(
                 tgt).addU8(qtype).setBytesImm(qnames));
     }
+
+    /**
+     * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
+     * payload's DNS questions contain the QNAMEs specified in {@code qnames} and qtype
+     * equals any of {@code qtypes}. Examines the payload starting at the offset in R0.
+     * Drops packets if packets are corrupted.
+     */
+    public abstract Type addJumpIfPktAtR0ContainDnsQ(@NonNull byte[] qnames, @NonNull int[] qtypes,
+            short tgt);
+
+    /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by {@code offset} match any of the elements in
+     * {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndDropIfBytesAtOffsetEqualsAnyOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by {@code offset} match any of the elements in
+     * {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndPassIfBytesAtOffsetEqualsAnyOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and drop if the bytes of the
+     * packet at an offset specified by {@code offset} match none the elements in {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndDropIfBytesAtOffsetEqualsNoneOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
+
+    /**
+     * Add an instruction to the end of the program to count and pass if the bytes of the
+     * packet at an offset specified by {@code offset} match none of the elements in
+     * {@code bytesList}.
+     * This method will use JBSPTRMATCH in APFv6.1 when possible.
+     */
+    public abstract Type addCountAndPassIfBytesAtOffsetEqualsNoneOf(int offset,
+            @NonNull List<byte[]> bytesList, ApfCounterTracker.Counter cnt)
+            throws IllegalInstructionException;
 
     /**
      * Appends a conditional jump instruction to the program: Jumps to {@code tgt} if the UDP
@@ -482,19 +548,35 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
      * packet at an offset specified by register0 match none of the elements in {@code bytesSet}.
      * R=0 means check for not equal.
      */
-    public final Type addJumpIfBytesAtR0EqualNoneOf(@NonNull List<byte[]> bytesList, short tgt) {
+    public final Type addJumpIfBytesAtR0EqualsNoneOf(@NonNull List<byte[]> bytesList, short tgt) {
         return addJumpIfBytesAtR0EqualsHelper(bytesList, tgt, false /* jumpOnMatch */);
     }
 
+    /**
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code offset} match any of the elements in
+     * {@code bytesSet}.
+     */
+    public abstract Type addJumpIfBytesAtOffsetEqualsAnyOf(int offset,
+            @NonNull List<byte[]> bytesList, short tgt) throws IllegalInstructionException;
 
     /**
-     * Check if the byte is valid dns character: A-Z,0-9,-,_
+     * Add an instruction to the end of the program to jump to {@code tgt} if the bytes of the
+     * packet at an offset specified by {@code offset} match none of the elements in
+     * {@code bytesSet}.
+     */
+    public abstract Type addJumpIfBytesAtOffsetEqualsNoneOf(int offset,
+            @NonNull List<byte[]> bytesList, short tgt) throws IllegalInstructionException;
+
+    /**
+     * Check if the byte is valid dns character: A-Z,0-9,-,_,%,@
      */
     private static boolean isValidDnsCharacter(byte c) {
-        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '%';
+        return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '%'
+                || c == '@';
     }
 
-    private static void validateNames(@NonNull byte[] names) {
+    static void validateNames(@NonNull byte[] names) {
         final int len = names.length;
         if (len < 4) {
             throw new IllegalArgumentException("qnames must have at least length 4");
@@ -589,6 +671,18 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
         append(new Instruction(opcode, R0));  // APFv6+: R0 op= R1
     }
 
+    @Override
+    public final Type addAdd(long val) {
+        if (val == 0) return self();
+        return append(new Instruction(Opcodes.ADD).addTwosCompSigned(val));
+    }
+
+    @Override
+    public final Type addAnd(long val) {
+        if (val == 0) return addLoadImmediate(R0, 0);
+        return append(new Instruction(Opcodes.AND).addTwosCompSigned(val));
+    }
+
     /**
      * Add an instruction to the end of the program to increment the counter value and
      * immediately return PASS.
@@ -631,5 +725,11 @@ public abstract class ApfV6GeneratorBase<Type extends ApfV6GeneratorBase<Type>> 
     @Override
     public final Type addCountTrampoline() {
         return self();
+    }
+
+    @Override
+    public final int getDefaultPacketHandlingSizeOverEstimate() {
+        // addCountAndPass(PASSED_IPV6_ICMP); -> 2 bytes
+        return 2;
     }
 }

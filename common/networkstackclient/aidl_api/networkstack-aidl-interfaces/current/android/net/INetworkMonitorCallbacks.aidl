@@ -34,13 +34,13 @@
 package android.net;
 /* @hide */
 interface INetworkMonitorCallbacks {
-  oneway void onNetworkMonitorCreated(in android.net.INetworkMonitor networkMonitor) = 0;
-  oneway void notifyNetworkTested(int testResult, @nullable String redirectUrl) = 1;
-  oneway void notifyPrivateDnsConfigResolved(in android.net.PrivateDnsConfigParcel config) = 2;
-  oneway void showProvisioningNotification(String action, String packageName) = 3;
-  oneway void hideProvisioningNotification() = 4;
-  oneway void notifyProbeStatusChanged(int probesCompleted, int probesSucceeded) = 5;
-  oneway void notifyNetworkTestedWithExtras(in android.net.NetworkTestResultParcelable result) = 6;
-  oneway void notifyDataStallSuspected(in android.net.DataStallReportParcelable report) = 7;
-  oneway void notifyCaptivePortalDataChanged(in android.net.CaptivePortalData data) = 8;
+  void onNetworkMonitorCreated(in android.net.INetworkMonitor networkMonitor) = 0;
+  void notifyNetworkTested(int testResult, @nullable String redirectUrl) = 1;
+  void notifyPrivateDnsConfigResolved(in android.net.PrivateDnsConfigParcel config) = 2;
+  void showProvisioningNotification(String action, String packageName) = 3;
+  void hideProvisioningNotification() = 4;
+  void notifyProbeStatusChanged(int probesCompleted, int probesSucceeded) = 5;
+  void notifyNetworkTestedWithExtras(in android.net.NetworkTestResultParcelable result) = 6;
+  void notifyDataStallSuspected(in android.net.DataStallReportParcelable report) = 7;
+  void notifyCaptivePortalDataChanged(in android.net.CaptivePortalData data) = 8;
 }
