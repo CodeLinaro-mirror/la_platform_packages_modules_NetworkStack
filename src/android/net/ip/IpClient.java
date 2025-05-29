@@ -88,6 +88,7 @@ import static com.android.networkstack.util.NetworkStackUtils.APF_ENABLE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD_VERSION;
+import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MDNS_ADVERTISING_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_MLD_OFFLOAD_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ND_OFFLOAD;
@@ -1117,7 +1118,8 @@ public class IpClient extends StateMachine {
                 mContext, APF_HANDLE_ND_OFFLOAD);
         // TODO: turn on APF mDNS offload on handhelds.
         mIsTvDevice = context.getPackageManager().hasSystemFeature(FEATURE_LEANBACK);
-        mApfHandleMdnsOffload = isAtLeast25Q2() && mIsTvDevice;
+        mApfHandleMdnsOffload = isAtLeast25Q2() && (mIsTvDevice || mDependencies.isFeatureEnabled(
+                context, APF_HANDLE_MDNS_ADVERTISING_OFFLOAD_VERSION));
         mApfHandleIgmpOffload =
                 mDependencies.isFeatureNotChickenedOut(mContext, APF_HANDLE_IGMP_OFFLOAD)
                     && (isAtLeast25Q2()
@@ -1148,8 +1150,8 @@ public class IpClient extends StateMachine {
         mNudFailureCountWeeklyThreshold = mDependencies.getDeviceConfigPropertyInt(
                 CONFIG_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD,
                 DEFAULT_NUD_FAILURE_COUNT_WEEKLY_THRESHOLD);
-        mDhcp6PdPreferredFlagEnabled =
-                mDependencies.isFeatureEnabled(mContext, IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION);
+        mDhcp6PdPreferredFlagEnabled = mDependencies.isFeatureNotChickenedOut(mContext,
+                    IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION);
         mReplaceNetdWithNetlinkEnabled = mDependencies.isFeatureEnabled(mContext,
                 IPCLIENT_REPLACE_NETD_WITH_NETLINK_VERSION);
         IpClientLinkObserver.Configuration config = new IpClientLinkObserver.Configuration(
@@ -2736,7 +2738,8 @@ public class IpClient extends StateMachine {
         if (params.defaultMtu == mInterfaceParams.defaultMtu) return;
 
         if (mReplaceNetdWithNetlinkEnabled) {
-            if (!NetlinkUtils.setInterfaceMtu(mInterfaceName, mInterfaceParams.defaultMtu)) {
+            if (!NetlinkUtils.setInterfaceMtu(mInterfaceParams.index,
+                    mInterfaceParams.defaultMtu)) {
                 logError("Couldn't reset MTU on " + mInterfaceName + " from "
                         + params.defaultMtu + " to " + mInterfaceParams.defaultMtu);
             }
