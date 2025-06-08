@@ -157,6 +157,7 @@ import android.os.UserHandle;
 import android.stats.connectivity.DisconnectCode;
 import android.stats.connectivity.NetworkQuirkEvent;
 import android.stats.connectivity.NudEventType;
+import android.stats.connectivity.TransportType;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.text.TextUtils;
@@ -2919,6 +2920,11 @@ public class IpClient extends StateMachine {
         apfConfig.handleIpv6PingOffload = mApfHandleIpv6PingOffload && apfConfig.apfRamSize >= 3000;
         apfConfig.minMetricsSessionDurationMs = mApfCounterPollingIntervalMs;
         apfConfig.hasClatInterface = mHasSeenClatInterface;
+        // Report APF version and RAM size upon creation. only reporting the metrics when
+        // IpClient stops is problematic for devices like TVs that remain connected to Wi-Fi all
+        // days.
+        NetworkStackStatsLog.write(NetworkStackStatsLog.APF_SESSION_INFO_REPORTED,
+                apfConfig.apfVersionSupported, apfConfig.apfRamSize);
         return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
                 mInterfaceParams, mIpClientApfController, mNetworkQuirkMetrics);
     }
@@ -3325,10 +3331,21 @@ public class IpClient extends StateMachine {
         }
     }
 
+    private static TransportType guessTransportType(@NonNull String interfaceName) {
+        if (interfaceName.startsWith("wlan")) {
+            return TransportType.TT_WIFI;
+        }
+        if (interfaceName.startsWith("usb") || interfaceName.startsWith("eth")) {
+            return TransportType.TT_ETHERNET;
+        }
+        return TransportType.TT_UNKNOWN;
+    }
+
     class StartedState extends State {
         @Override
         public void enter() {
             mIpProvisioningMetrics.reset();
+            mIpProvisioningMetrics.setTransportType(guessTransportType(mInterfaceName));
             mStartTimeMillis = SystemClock.elapsedRealtime();
 
             if (mConfiguration.mProvisioningTimeoutMs > 0) {
