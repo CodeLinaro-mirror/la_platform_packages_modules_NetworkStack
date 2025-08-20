@@ -279,6 +279,7 @@ java_defaults {
     ],
     static_libs: [
         "androidx.annotation_annotation",
+        "com.android.networkstack.mainline.beta.flags-aconfig-java",
         "modules-utils-build_system",
         "modules-utils-expresslog",
         "modules-utils-preconditions",
@@ -614,4 +615,18 @@ java_library_static {
         "networkstackprotos",
     ],
     defaults: ["NetworkStackReleaseApiLevel"],
+}
+
+aconfig_declarations {
+    name: "networkstack.mainline.beta.flags",
+    package: "com.android.networkstack.mainline.beta",
+    container: "NetworkStack",
+    srcs: ["mainline_beta.aconfig"],
+}
+
+java_aconfig_library {
+    name: "com.android.networkstack.mainline.beta.flags-aconfig-java",
+    aconfig_declarations: "networkstack.mainline.beta.flags",
+    defaults: ["framework-minus-apex-aconfig-java-defaults"],
+    min_sdk_version: "30",
 }
