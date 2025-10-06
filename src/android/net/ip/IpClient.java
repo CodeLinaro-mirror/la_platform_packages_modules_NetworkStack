@@ -162,6 +162,7 @@ import android.stats.connectivity.NudEventType;
 import android.stats.connectivity.TransportType;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.system.OsConstants;
 import android.text.TextUtils;
 import android.text.format.DateUtils;
 import android.util.LocalLog;
@@ -1097,7 +1098,10 @@ public class IpClient extends StateMachine {
                 final int size = (int) (caps >> 32);
                 return new ApfCapabilities(version, size, ARPHRD_ETHER);
             } catch (ErrnoException e) {
-                log.e("[Non-HAL API] Cannot get APF capabilities: ", e);
+                // Do not log an error if the native API is not implemented.
+                if (e.errno != OsConstants.ENOSYS) {
+                    log.e("[Non-HAL API] Cannot get APF capabilities: ", e);
+                }
                 return null;
             }
         }
@@ -3664,11 +3668,6 @@ public class IpClient extends StateMachine {
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPREACHABILITYMONITOR);
                 return;
             }
-
-            // TODO: start the Dhcp6AddrRegTracker until M or O flag is detected.
-            if (mDhcp6AddressRegistrationEnabled) {
-                mDhcp6AddrRegTracker.start(mInterfaceParams, mLinkProperties);
-            }
         }
 
         @Override
@@ -4081,9 +4080,9 @@ public class IpClient extends StateMachine {
                     break;
 
                 case CMD_DHCP6_ADDR_REG_START:
-                    // TODO: fix M / O bit detection and start address registration tracker here.
-                    // This has not been working reliably across different kernels.
-                    Log.i(mTag, "M or O bit detected");
+                    if (mDhcp6AddressRegistrationEnabled) {
+                        mDhcp6AddrRegTracker.start(mInterfaceParams, mLinkProperties);
+                    }
                     break;
 
                 case Dhcp6Client.CMD_DHCP6_RESULT:
