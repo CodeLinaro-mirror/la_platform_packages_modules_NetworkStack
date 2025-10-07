@@ -134,6 +134,7 @@ import android.net.apf.ApfFilter;
 import android.net.dhcp.DhcpClient;
 import android.net.dhcp.DhcpPacket;
 import android.net.dhcp6.Dhcp6Client;
+import android.net.dhcp6.Dhcp6PacketDispatcher;
 import android.net.ipmemorystore.OnNetworkEventCountRetrievedListener;
 import android.net.ipmemorystore.Status;
 import android.net.metrics.IpConnectivityLog;
@@ -661,6 +662,7 @@ public class IpClient extends StateMachine {
         static final String CMD_INSTALL_APF_PROGRAM = "install";
         static final String CMD_GET_APF_CAPABILITIES = "capabilities";
         static final String CMD_DUMP_APF_COUNTERS = "dump-counters";
+        static final String CMD_GET_APF_CONFIG = "config";
 
         static boolean shouldUpdateDataSnapshot(final String cmd) {
             return cmd.equals(CMD_READ_APF_DATA) || cmd.equals(CMD_DUMP_APF_COUNTERS);
@@ -822,6 +824,7 @@ public class IpClient extends StateMachine {
     @VisibleForTesting
     protected final IpClientCallbacksWrapper mCallback;
     private final ApfFilter.IApfController mIpClientApfController;
+    private final ApfFilter.IApfController mNonHalApfController;
     private final Dependencies mDependencies;
     private final ConnectivityManager mCm;
     private final INetd mNetd;
@@ -842,6 +845,7 @@ public class IpClient extends StateMachine {
     private final Set<IpPrefix> mDelegatedPrefixes = new HashSet<>();
     @Nullable
     private final DevicePolicyManager mDevicePolicyManager;
+    private final Dhcp6PacketDispatcher mDhcp6PacketDispatcher;
 
     // Ignore any nonzero RA section with lifetime below this value.
     private final int mAcceptRaMinLft;
@@ -868,6 +872,7 @@ public class IpClient extends StateMachine {
     private final boolean mDhcp6PdPreferredFlagEnabled;
     private final boolean mReplaceNetdWithNetlinkEnabled;
     private final boolean mIsTvDevice;
+    private final boolean mDhcp6AddressRegistrationEnabled;
 
     private InterfaceParams mInterfaceParams;
 
@@ -894,6 +899,7 @@ public class IpClient extends StateMachine {
     private Integer mDadTransmits = null;
     private int mMaxDtimMultiplier = DTIM_MULTIPLIER_RESET;
     private ApfCapabilities mCurrentApfCapabilities;
+    private byte[] mApfRam = new byte[0];
     private WakeupMessage mIpv6AutoconfTimeoutAlarm = null;
     private boolean mIgnoreNudFailure;
     /**
@@ -957,8 +963,9 @@ public class IpClient extends StateMachine {
          * Get a Dhcp6Client instance.
          */
         public Dhcp6Client makeDhcp6Client(Context context, StateMachine controller,
-                InterfaceParams ifParams, Dhcp6Client.Dependencies deps) {
-            return Dhcp6Client.makeDhcp6Client(context, controller, ifParams, deps);
+                InterfaceParams ifParams, Dhcp6PacketDispatcher dispatcher,
+                Dhcp6Client.Dependencies deps) {
+            return Dhcp6Client.makeDhcp6Client(context, controller, ifParams, dispatcher, deps);
         }
 
         /**
@@ -1072,6 +1079,56 @@ public class IpClient extends StateMachine {
             return new IpClientNetlinkMonitor(h, log, tag, sockRcvbufSize,
                     isDhcp6PdPreferredFlagEnabled, p);
         }
+
+        /**
+         * Get the APF capabilities for the specified interface through Non-HAL API.
+         */
+        @Nullable
+        public ApfCapabilities getApfCapabilities(String ifName, SharedLog log) {
+            try {
+                final long caps = NetworkStackUtils.getApfCapabilities(ifName);
+                if (caps < 0) return null;
+                // The lower 32 bits is the APF version, the upper 32 bit is the RAM size.
+                final int version = (int) caps;
+                final int size = (int) (caps >> 32);
+                return new ApfCapabilities(version, size, ARPHRD_ETHER);
+            } catch (ErrnoException e) {
+                log.e("[Non-HAL API] Cannot get APF capabilities: ", e);
+                return null;
+            }
+        }
+
+        /**
+         * Install a packet filter on the specified interface through Non-HAL API.
+         */
+        public boolean installPacketFilter(String ifName, byte[] filter, SharedLog log) {
+            try {
+                NetworkStackUtils.installPacketFilter(ifName, filter);
+                return true;
+            } catch (ErrnoException e) {
+                log.e("[Non-HAL API] Failed to install packet filter", e);
+                return false;
+            }
+        }
+
+        /**
+         * Read the packet filter RAM from the specified interface through Non-HAL API.
+         */
+        public boolean readPacketFilterRam(String ifName, byte[] output, SharedLog log) {
+            try {
+                return NetworkStackUtils.readPacketFilterRam(ifName, output);
+            } catch (ErrnoException e) {
+                log.e("[Non-HAL API] Failed to read packet filter RAM", e);
+                return false;
+            }
+        }
+
+        /**
+         * Read the mainline beta flag `dhcpv6_address_registration`.
+         */
+        public boolean isDhcp6AddressRegistrationEnabled() {
+            return com.android.networkstack.mainline.beta.Flags.dhcpv6AddressRegistration();
+        }
     }
 
     public IpClient(Context context, String ifName, IIpClientCallbacks callback,
@@ -1118,11 +1175,47 @@ public class IpClient extends StateMachine {
                 mCallback.startReadPacketFilter(event);
             }
         };
+        mNonHalApfController = new ApfFilter.IApfController() {
+            @Override
+            public boolean installPacketFilter(byte[] filter, String filterConfig) {
+                mLog.log("[Non-HAL API] installPacketFilter(byte[" + filter.length + "])"
+                        + " config: "
+                        + filterConfig);
+                if (mApfDebug) {
+                    mApfLog.log(
+                            "[Non-HAL API] updated APF program: " + HexDump.toHexString(filter));
+                }
+                return mDependencies.installPacketFilter(ifName, filter, mLog);
+            }
+
+            @Override
+            public void readPacketFilterRam(String event) {
+                mLog.log("[Non-HAL API] startReadPacketFilter(), event: " + event);
+                if (mDependencies.readPacketFilterRam(ifName, mApfRam, mLog)) {
+                    readPacketFilterComplete(mApfRam);
+                }
+            }
+        };
 
         // TODO: Consider creating, constructing, and passing in some kind of
         // InterfaceController.Dependencies class.
         mNetd = deps.getNetd(mContext);
         mInterfaceCtrl = new InterfaceController(mInterfaceName, mNetd, mLog);
+
+        // The DHCPv6 address registration feature requires control message APIs and their
+        // corresponding cmsg structures, such as Os.recvmsg and StructMsghdr. These are only
+        // available on Android S (SDK Level 31) and later. Therefore, a beta flag for this
+        // feature is also used to determine if this new control message syscalls should be
+        // activated.
+        //
+        // Meanwhile Dhcp6Client now uses the PacketDispatcher class as well. This change won't
+        // affect any behavior until the address registration feature is enabled. When that happens,
+        // Dhcp6Client will use control message syscalls to receive DHCPv6 messages with ancillary
+        // data, making the code safer to roll out along with mainline beta program.
+        mDhcp6AddressRegistrationEnabled =
+                mDependencies.isDhcp6AddressRegistrationEnabled() && SdkLevel.isAtLeastS();
+        mDhcp6PacketDispatcher = new Dhcp6PacketDispatcher(getHandler(), ifName,
+                mDhcp6AddressRegistrationEnabled /* useControlMessageApi */);
 
         mAcceptRaMinLft = mDependencies.getDeviceConfigPropertyInt(CONFIG_ACCEPT_RA_MIN_LFT,
                 DEFAULT_ACCEPT_RA_MIN_LFT);
@@ -1729,6 +1822,9 @@ public class IpClient extends StateMachine {
                                     .append("\n");
                         }
                         result.complete(sb.toString());
+                        break;
+                    case ApfShellCommands.CMD_GET_APF_CONFIG:
+                        result.complete(mApfFilter.getApfConfigMessage());
                         break;
                     default:
                         throw new IllegalArgumentException("Invalid apf command: " + cmd);
@@ -2627,8 +2723,9 @@ public class IpClient extends StateMachine {
     /** Creates Dhcp6Client and starts DHCPv6-PD. It is safe to call this function multiple times */
     private void startDhcp6PrefixDelegation() {
         if (mDhcp6Client == null) {
-            mDhcp6Client = mDependencies.makeDhcp6Client(mContext, IpClient.this,
-                    mInterfaceParams, mDependencies.getDhcp6ClientDependencies());
+            mDhcp6Client = mDependencies.makeDhcp6Client(mContext,
+                    IpClient.this, mInterfaceParams, mDhcp6PacketDispatcher,
+                    mDependencies.getDhcp6ClientDependencies());
         }
         mDhcp6Client.sendMessage(Dhcp6Client.CMD_START_DHCP6);
     }
@@ -2848,10 +2945,20 @@ public class IpClient extends StateMachine {
     }
 
     @Nullable
-    private ApfFilter maybeCreateApfFilter(final ApfCapabilities apfCaps) {
+    private ApfFilter maybeCreateApfFilter(final ApfCapabilities apfCapsFromHalApi) {
+        final ApfCapabilities apfCapsFromNonHalApi =
+                mDependencies.getApfCapabilities(mInterfaceName, mLog);
+        mLog.log("getting APF capabilities from non-hal API: " + apfCapsFromNonHalApi);
+        final ApfCapabilities apfCaps =
+                apfCapsFromNonHalApi != null ? apfCapsFromNonHalApi : apfCapsFromHalApi;
+        final ApfFilter.IApfController apfController =
+                apfCapsFromNonHalApi != null ? mNonHalApfController : mIpClientApfController;
         ApfFilter.ApfConfiguration apfConfig = new ApfFilter.ApfConfiguration();
         if (!isApfSupported(apfCaps) || !mEnableApf) {
             return null;
+        }
+        if (apfCapsFromNonHalApi != null) {
+            mApfRam = new byte[apfCapsFromNonHalApi.maximumApfProgramSize];
         }
         // For now only support generating programs for Ethernet frames. If this restriction is
         // lifted the program generator will need its offsets adjusted.
@@ -2926,7 +3033,7 @@ public class IpClient extends StateMachine {
         NetworkStackStatsLog.write(NetworkStackStatsLog.APF_SESSION_INFO_REPORTED,
                 apfConfig.apfVersionSupported, apfConfig.apfRamSize);
         return mDependencies.maybeCreateApfFilter(getHandler(), mContext, apfConfig,
-                mInterfaceParams, mIpClientApfController, mNetworkQuirkMetrics);
+                mInterfaceParams, apfController, mNetworkQuirkMetrics);
     }
 
     private boolean isApfSupported(ApfCapabilities apfCapabilities) {
@@ -3521,6 +3628,10 @@ public class IpClient extends StateMachine {
             mPacketTracker = createPacketTracker();
             if (mPacketTracker != null) mPacketTracker.start(mConfiguration.mDisplayName);
 
+            if (!mDhcp6PacketDispatcher.start()) {
+                Log.e(TAG, "Failed to start DHCPv6 packet dispatcher");
+            }
+
             if (isIpv6Enabled() && !startIPv6(1 /* acceptRaDefrtr */)) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV6);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPV6);
@@ -3573,6 +3684,7 @@ public class IpClient extends StateMachine {
                 mApfFilter = null;
             }
 
+            mDhcp6PacketDispatcher.stop();
             resetLinkProperties();
 
             removeMessages(CMD_UPDATE_APF_DATA_SNAPSHOT);
@@ -4045,7 +4157,7 @@ public class IpClient extends StateMachine {
 
     /**
      * Check if current LinkProperties has either global IPv6 address or ULA (i.e. non IPv6
-     * link-local addres).
+     * link-local address).
      *
      * This function can be used to derive the DTIM multiplier per current network situation or
      * decide if we should start DHCPv6 Prefix Delegation when no IPv6 addresses are available

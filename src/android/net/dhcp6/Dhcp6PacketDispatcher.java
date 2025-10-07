@@ -65,6 +65,8 @@ public class Dhcp6PacketDispatcher extends FdEventsReader<Dhcp6PacketDispatcher.
     private static final String TAG = Dhcp6PacketDispatcher.class.getSimpleName();
     protected final String mInterfaceName;
     private final SparseArray<MessageHandler> mMessageHandlers = new SparseArray<>();
+    // Indicate whether to use the control message APIs with ancillary data.
+    private final boolean mUseControlMessageApi;
 
     // The {@link android.system.OsConstants#IPV6_PKTINFO} is only available from
     // Android 15 (API 35). This local definition is used to provide backward compatibility.
@@ -89,9 +91,10 @@ public class Dhcp6PacketDispatcher extends FdEventsReader<Dhcp6PacketDispatcher.
         void handleMessage(@NonNull Dhcp6Packet packet, @Nullable Inet6Address dst);
     }
 
-    public Dhcp6PacketDispatcher(Handler handler, String iface) {
+    public Dhcp6PacketDispatcher(Handler handler, String iface, boolean useControlMessageApi) {
         super(handler, new Payload());
         mInterfaceName = iface;
+        mUseControlMessageApi = useControlMessageApi;
     }
 
     @Override
@@ -135,7 +138,6 @@ public class Dhcp6PacketDispatcher extends FdEventsReader<Dhcp6PacketDispatcher.
             final byte type = packet.getMessageType();
             final MessageHandler handler = mMessageHandlers.get(type);
             if (handler == null) {
-                Log.e(TAG, "received DHCPv6 message type doesn't register yet");
                 return;
             }
             handler.handleMessage(packet, payload.mDstAddr);
@@ -146,25 +148,27 @@ public class Dhcp6PacketDispatcher extends FdEventsReader<Dhcp6PacketDispatcher.
 
     @Override
     protected FileDescriptor createFd() {
+        FileDescriptor socket = null;
         try {
-            final FileDescriptor socket =
-                    Os.socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+            socket = Os.socket(AF_INET6, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
             if (SdkLevel.isAtLeastS()) {
                 Os.setsockoptInt(socket, IPPROTO_IPV6, IPV6_RECVPKTINFO, 1);
             }
             SocketUtils.bindSocketToInterface(socket, mInterfaceName);
             Os.bind(socket, IPV6_ADDR_ANY, DHCP6_CLIENT_PORT);
-            return socket;
         } catch (SocketException | ErrnoException e) {
             Log.e(TAG, "Error creating udp socket", e);
+            closeFd(socket);
+            socket = null;
             return null;
         }
+        return socket;
     }
 
     @Override
     protected int readPacket(@NonNull FileDescriptor fd,
             @NonNull Payload packetBuffer) throws Exception {
-        if (SdkLevel.isAtLeastS()) {
+        if (mUseControlMessageApi) {
             final ByteBuffer payload = ByteBuffer.wrap(packetBuffer.mBytes);
 
             // The source address placehodler, will be filled by kernel.
