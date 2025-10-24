@@ -282,7 +282,6 @@ import com.android.net.module.util.ConnectivityUtils;
 import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.PacketReader;
 import com.android.net.module.util.ProcfsParsingUtils;
-import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.networkstack.metrics.ApfSessionInfoMetrics;
 import com.android.networkstack.metrics.IpClientRaInfoMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
@@ -814,13 +813,14 @@ public class ApfFilter {
         }
 
         /**
-         * Loads the existing interface MTU for the specific interface from netlink.
+         * Loads the existing interface MTU for the specific interface from the file
+         * /sys/class/net/{ifname}/mtu.
          *
          * If the file does not exist or the interface is not found,
          * the function returns 1500 as default interface MTU.
          */
         public int getInterfaceMtu(@NonNull String ifname) {
-            return NetlinkUtils.getInterfaceMtu(ifname);
+            return ProcfsParsingUtils.getInterfaceMtu(ifname);
         }
     }
 
@@ -3516,13 +3516,8 @@ public class ApfFilter {
             throws IllegalInstructionException {
         final short skipPort7V4Filter = gen.getUniqueLabel();
 
-        // Check it's TCP.
-        gen.addLoad8intoR0(IPV4_PROTOCOL_OFFSET);
-        gen.addJumpIfR0NotEquals(IPPROTO_TCP, skipPort7V4Filter);
-
-        // Check it's not a fragment or is the initial fragment.
-        gen.addLoad16intoR0(IPV4_FRAGMENT_OFFSET_OFFSET);
-        gen.addJumpIfR0AnyBitsSet(IPV4_FRAGMENT_OFFSET_MASK, skipPort7V4Filter);
+        // Check it's TCP and not a fragment (or is the initial fragment).
+        gen.addJumpIfNotUnfragmentedIPv4Protocol(IPPROTO_TCP, skipPort7V4Filter);
 
         // Check it's destination port 7.
         gen.addLoadFromMemory(R1, MemorySlot.IPV4_HEADER_SIZE);
