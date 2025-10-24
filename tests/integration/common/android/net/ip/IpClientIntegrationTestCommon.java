@@ -86,7 +86,6 @@ import static com.android.net.module.util.NetworkStackConstants.NEIGHBOR_ADVERTI
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_AUTONOMOUS;
 import static com.android.net.module.util.NetworkStackConstants.PIO_FLAG_ON_LINK;
 import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_DHCPV6_PD_PREFERRED_FLAG_VERSION;
-import static com.android.networkstack.util.NetworkStackUtils.IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_IGNORE_ORGANIC_NUD_FAILURE_VERSION;
 import static com.android.networkstack.util.NetworkStackUtils.IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION;
@@ -163,6 +162,7 @@ import android.net.dhcp.DhcpDiscoverPacket;
 import android.net.dhcp.DhcpPacket;
 import android.net.dhcp.DhcpPacket.ParseException;
 import android.net.dhcp.DhcpRequestPacket;
+import android.net.dhcp6.Dhcp6AddrRegTracker;
 import android.net.dhcp6.Dhcp6Client;
 import android.net.dhcp6.Dhcp6PacketDispatcher;
 import android.net.ipmemorystore.NetworkAttributes;
@@ -186,6 +186,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import android.platform.test.annotations.EnableFlags;
 import android.provider.Settings;
 import android.stats.connectivity.NudEventType;
 import android.system.ErrnoException;
@@ -226,6 +227,7 @@ import com.android.net.module.util.structs.RdnssOption;
 import com.android.networkstack.R;
 import com.android.networkstack.apishim.CaptivePortalDataShimImpl;
 import com.android.networkstack.ipmemorystore.IpMemoryStoreService;
+import com.android.networkstack.mainline.beta.Flags;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.metrics.IpReachabilityMonitorMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
@@ -237,6 +239,7 @@ import com.android.testutils.CompatUtil;
 import com.android.testutils.ConnectivityDiagnosticsCollector;
 import com.android.testutils.DevSdkIgnoreRule;
 import com.android.testutils.DevSdkIgnoreRule.IgnoreUpTo;
+import com.android.testutils.DevSdkIgnoreRunner;
 import com.android.testutils.HandlerUtils;
 import com.android.testutils.PollPacketReader;
 import com.android.testutils.TestableNetworkAgent;
@@ -250,6 +253,7 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
+import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -293,6 +297,8 @@ import java.util.function.Predicate;
  * Tests in this class can either be run with signature permissions, or with root access.
  */
 @SmallTest
+@RunWith(DevSdkIgnoreRunner.class)
+@IgnoreUpTo(Build.VERSION_CODES.R)
 public abstract class IpClientIntegrationTestCommon {
     private static final String TAG = IpClientIntegrationTestCommon.class.getSimpleName();
     private static final int DATA_BUFFER_LEN = 4096;
@@ -328,6 +334,12 @@ public abstract class IpClientIntegrationTestCommon {
     private static final byte TEST_PIO_FLAGS_P_UNSET = (byte) 0xC0; // L=1,A=1,R=0,P=0
     private static final byte TEST_PIO_FLAGS_P_SET = (byte) 0xD0;   // L=1,A=1,R=0,P=1
 
+    // Note that this test contains @EnableFlags annotations but no SetFlagsRule. This is because
+    // this test is run with both an in-process (IpClientSignatureTest) and
+    // out-of-process (IpClientRootTest) IpClient instance. Only the in-process test is able to
+    // properly set the flags, so the SetFlagsRule is part of the IpClientSignatureTest subclass.
+    // The IpClientRootTest uses a custom rule that optionally skips tests based on the @EnableFlags
+    // values without actually enabling them (similar to the existing CheckFlagsRule).
     @Rule
     public final DevSdkIgnoreRule mIgnoreRule = new DevSdkIgnoreRule();
     @Rule
@@ -381,6 +393,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Mock private IpReachabilityMonitorMetrics mIpReachabilityMonitorMetrics;
     @Mock private DevicePolicyManager mDevicePolicyManager;
     @Mock private PackageManager mPackageManager;
+    @Mock private Dhcp6AddrRegTracker mDhcp6AddrRegTracker;
     @Spy private INetd mNetd;
 
     protected IpClient mIpc;
@@ -663,6 +676,12 @@ public abstract class IpClientIntegrationTestCommon {
         @Override
         public NetworkQuirkMetrics getNetworkQuirkMetrics() {
             return new NetworkQuirkMetrics(mNetworkQuirkMetricsDeps);
+        }
+
+        @Override
+        public Dhcp6AddrRegTracker makeDhcp6AddrRegTracker(Context context, Handler handler,
+                String ifName, Dhcp6PacketDispatcher dispatcher) {
+            return mDhcp6AddrRegTracker;
         }
     }
 
@@ -4085,12 +4104,6 @@ public abstract class IpClientIntegrationTestCommon {
         return ns;
     }
 
-    // Override this function with disabled experiment flag by default, in order not to
-    // affect those tests which are just related to basic IpReachabilityMonitor infra.
-    private void prepareIpReachabilityMonitorTest() throws Exception {
-        prepareIpReachabilityMonitorTest(false /* isMulticastResolicitEnabled */);
-    }
-
     private void assertNotifyNeighborLost(Inet6Address targetIp, NudEventType eventType)
             throws Exception {
         // For root test suite, rely on the IIpClient aidl interface version constant defined in
@@ -4191,8 +4204,7 @@ public abstract class IpClientIntegrationTestCommon {
      * 29 fe80::bf8e:de37:69d7:2b29   ff02::1:ff00:1   ICMPv6   92    Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
      * 31 fe80::bf8e:de37:69d7:2b29   ff02::1:ff00:1   ICMPv6   92    Neighbor Solicitation for fe80::1 from 0a:c9:06:70:77:b3
      */
-    private void prepareIpReachabilityMonitorTest(boolean isMulticastResolicitEnabled)
-            throws Exception {
+    private void prepareIpReachabilityMonitorTest() throws Exception {
         mNetworkAgentThread =
                 new HandlerThread(IpClientIntegrationTestCommon.class.getSimpleName());
         mNetworkAgentThread.start();
@@ -4205,8 +4217,6 @@ public abstract class IpClientIntegrationTestCommon {
                 .withDisplayName(TEST_DEFAULT_SSID)
                 .withoutIPv4()
                 .build();
-        setFeatureEnabled(NetworkStackUtils.IP_REACHABILITY_MCAST_RESOLICIT_VERSION,
-                isMulticastResolicitEnabled);
         startIpClientProvisioning(config);
         verify(mCb, timeout(TEST_TIMEOUT_MS)).setFallbackMulticastFilter(true);
 
@@ -4241,21 +4251,9 @@ public abstract class IpClientIntegrationTestCommon {
         forceLayer2Roaming();
     }
 
-    private void runIpReachabilityMonitorProbeFailedTest() throws Exception {
-        prepareIpReachabilityMonitorTest();
-
-        final int expectedNudSolicitNum = readNudSolicitNumPostRoamingFromResource();
-        final List<NeighborSolicitation> nsList =
-                waitForMultipleNeighborSolicitations(expectedNudSolicitNum);
-        for (NeighborSolicitation ns : nsList) {
-            assertUnicastNeighborSolicitation(ns, ROUTER_MAC /* dstMac */,
-                    ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
-        }
-    }
-
     @Test
     public void testIpReachabilityMonitor_probeFailed() throws Exception {
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
                 NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
     }
@@ -4264,7 +4262,7 @@ public abstract class IpClientIntegrationTestCommon {
     public void testIpReachabilityMonitor_probeFailed_legacyCallback() throws Exception {
         when(mCb.getInterfaceVersion()).thenReturn(12 /* assign an older interface aidl version */);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         verify(mCb, timeout(TEST_TIMEOUT_MS)).onReachabilityLost(any());
         verify(mCb, never()).onReachabilityFailure(any());
     }
@@ -4286,7 +4284,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     private void runIpReachabilityMonitorMcastResolicitProbeFailedTest() throws Exception {
-        prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
+        prepareIpReachabilityMonitorTest();
 
         final int expectedNudSolicitNum = readNudSolicitNumPostRoamingFromResource();
         int expectedSize = expectedNudSolicitNum + NUD_MCAST_RESOLICIT_NUM;
@@ -4321,7 +4319,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     public void testIpReachabilityMonitor_mcastResolicitProbeReachableWithSameLinkLayerAddress()
             throws Exception {
-        prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
+        prepareIpReachabilityMonitorTest();
 
         final NeighborSolicitation ns = waitForUnicastNeighborSolicitation(ROUTER_MAC /* dstMac */,
                 ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
@@ -4338,7 +4336,7 @@ public abstract class IpClientIntegrationTestCommon {
     @Test
     public void testIpReachabilityMonitor_mcastResolicitProbeReachableWithDiffLinkLayerAddress()
             throws Exception {
-        prepareIpReachabilityMonitorTest(true /* isMulticastResolicitEnabled */);
+        prepareIpReachabilityMonitorTest();
 
         final NeighborSolicitation ns = waitForUnicastNeighborSolicitation(ROUTER_MAC /* dstMac */,
                 ROUTER_LINK_LOCAL /* dstIp */, ROUTER_LINK_LOCAL /* targetIp */);
@@ -5365,7 +5363,7 @@ public abstract class IpClientIntegrationTestCommon {
 
     @ConnectivityDiagnosticsCollector.CollectTcpdumpOnFailure
     @Test
-    @Flag(name =  IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
+    @EnableFlags(Flags.FLAG_IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME)
     public void testDhcp6Pd() throws Exception {
         final IpPrefix prefix = new IpPrefix("2001:db8:1::/64");
         prepareDhcp6PdTest();
@@ -6153,7 +6151,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
+    @EnableFlags(Flags.FLAG_IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME)
     public void testPopulateLinkAddressLifetime() throws Exception {
         final LinkProperties lp = doDualStackProvisioning();
         final long now = SystemClock.elapsedRealtime();
@@ -6175,7 +6173,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
+    @EnableFlags(Flags.FLAG_IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME)
     public void testPopulateLinkAddressLifetime_infiniteLeaseDuration() throws Exception {
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
@@ -6199,7 +6197,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
+    @EnableFlags(Flags.FLAG_IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME)
     public void testPopulateLinkAddressLifetime_minimalLeaseDuration() throws Exception {
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
@@ -6226,7 +6224,7 @@ public abstract class IpClientIntegrationTestCommon {
     }
 
     @Test
-    @Flag(name = IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME_VERSION, enabled = true)
+    @EnableFlags(Flags.FLAG_IPCLIENT_POPULATE_LINK_ADDRESS_LIFETIME)
     public void testPopulateLinkAddressLifetime_onDhcpRenew() throws Exception {
         final ProvisioningConfiguration cfg = new ProvisioningConfiguration.Builder()
                 .withoutIPv6()
@@ -6366,7 +6364,7 @@ public abstract class IpClientIntegrationTestCommon {
         final long expiry = when + ONE_WEEK_IN_MS;
         storeNudFailureEvents(when, expiry, 10, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNeverNotifyNeighborLost();
     }
 
@@ -6378,7 +6376,7 @@ public abstract class IpClientIntegrationTestCommon {
         final long expiry = when + ONE_WEEK_IN_MS;
         storeNudFailureEvents(when, expiry, 19, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
                 NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
     }
@@ -6392,7 +6390,7 @@ public abstract class IpClientIntegrationTestCommon {
         final long expiry = when + ONE_WEEK_IN_MS;
         storeNudFailureEvents(when, expiry, 9, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
                 NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
     }
@@ -6410,7 +6408,7 @@ public abstract class IpClientIntegrationTestCommon {
         expiry = when + ONE_WEEK_IN_MS;
         storeNudFailureEvents(when, expiry, 9, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNeverNotifyNeighborLost();
     }
 
@@ -6427,7 +6425,7 @@ public abstract class IpClientIntegrationTestCommon {
         expiry = when + ONE_WEEK_IN_MS;
         storeNudFailureEvents(when, expiry, 9, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
                 NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
     }
@@ -6444,7 +6442,7 @@ public abstract class IpClientIntegrationTestCommon {
         expiry = when + ONE_WEEK_IN_MS;
         storeNudFailureEvents(when, expiry, 9, IIpMemoryStore.NETWORK_EVENT_NUD_FAILURE_ROAM);
 
-        runIpReachabilityMonitorProbeFailedTest();
+        runIpReachabilityMonitorMcastResolicitProbeFailedTest();
         assertNotifyNeighborLost(ROUTER_LINK_LOCAL /* targetIp */,
                 NudEventType.NUD_POST_ROAMING_FAILED_CRITICAL);
     }
