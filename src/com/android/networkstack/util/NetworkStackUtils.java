@@ -157,11 +157,6 @@ public class NetworkStackUtils {
             new String [] {"https://www.google.com/generate_204"};
 
     /**
-     * Minimum module version at which to enable the DHCP Rapid Commit option.
-     */
-    public static final String DHCP_RAPID_COMMIT_VERSION = "dhcp_rapid_commit_version";
-
-    /**
      * Minimum module version at which to enable the IP address conflict detection feature.
      */
     public static final String DHCP_IP_CONFLICT_DETECT_VERSION = "dhcp_ip_conflict_detect_version";
@@ -192,13 +187,6 @@ public class NetworkStackUtils {
     public static final String VALIDATION_METRICS_VERSION = "validation_metrics_version";
 
     /**
-     * Experiment flag to enable "mcast_resolicit" neighbor parameter in IpReachabilityMonitor,
-     * set it to 3 by default.
-     */
-    public static final String IP_REACHABILITY_MCAST_RESOLICIT_VERSION =
-            "ip_reachability_mcast_resolicit_version";
-
-    /**
      * Experiment flag to treat router MAC address changes as a failure only on roam.
      */
     public static final String IP_REACHABILITY_ROUTER_MAC_CHANGE_FAILURE_ONLY_AFTER_ROAM_VERSION =
@@ -227,6 +215,12 @@ public class NetworkStackUtils {
      */
     public static final String NETWORKMONITOR_ASYNC_PRIVDNS_RESOLUTION =
             "networkmonitor_async_privdns_resolution";
+
+    /**
+     * Feature flag to always use the CAPPORT data when doing fallback to cellular.
+     */
+    public static final String NETWORKMONITOR_USE_CAPPORT_DATA_IN_FALLBACK =
+            "networkmonitor_use_capport_data_in_fallback";
 
     /**
      * Experiment flag to support parsing PIO P flag(DHCPv6-PD preferred).

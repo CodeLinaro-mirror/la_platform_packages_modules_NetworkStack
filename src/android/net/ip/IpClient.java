@@ -63,6 +63,7 @@ import static android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor;
 import static android.net.ip.IpClientLinkObserver.IpClientNetlinkMonitor.INetlinkMessageProcessor;
 import static android.net.ip.IpReachabilityMonitor.INVALID_REACHABILITY_LOSS_TYPE;
 import static android.net.ip.IpReachabilityMonitor.nudEventTypeToInt;
+import static android.net.ip.IpReachabilityMonitor.nudEventTypeToNetworkEvent;
 import static android.net.util.SocketUtils.makePacketSocketAddress;
 import static android.provider.DeviceConfig.NAMESPACE_CONNECTIVITY;
 import static android.stats.connectivity.NetworkQuirkEvent.QE_DHCP6_HEURISTIC_TRIGGERED;
@@ -129,6 +130,7 @@ import android.net.RouteInfo;
 import android.net.TcpKeepalivePacketDataParcelable;
 import android.net.Uri;
 import android.net.apf.ApfCapabilities;
+import android.net.apf.ApfController;
 import android.net.apf.ApfCounterTracker;
 import android.net.apf.ApfFilter;
 import android.net.dhcp.DhcpClient;
@@ -189,6 +191,7 @@ import com.android.net.module.util.InterfaceParams;
 import com.android.net.module.util.LinkPropertiesUtils;
 import com.android.net.module.util.SharedLog;
 import com.android.net.module.util.SocketUtils;
+import com.android.net.module.util.TerribleErrorLog;
 import com.android.net.module.util.arp.ArpPacket;
 import com.android.net.module.util.ip.InterfaceController;
 import com.android.net.module.util.netlink.NetlinkUtils;
@@ -1088,42 +1091,21 @@ public class IpClient extends StateMachine {
          */
         @Nullable
         public ApfCapabilities getApfCapabilities(String ifName, SharedLog log) {
-            try {
-                final long caps = NetworkStackUtils.getApfCapabilities(ifName);
-                if (caps < 0) return null;
-                // The lower 32 bits is the APF version, the upper 32 bit is the RAM size.
-                final int version = (int) caps;
-                final int size = (int) (caps >> 32);
-                return new ApfCapabilities(version, size, ARPHRD_ETHER);
-            } catch (ErrnoException e) {
-                log.e("[Non-HAL API] Cannot get APF capabilities: ", e);
-                return null;
-            }
+            return ApfController.getApfCapabilities(ifName, log);
         }
 
         /**
          * Install a packet filter on the specified interface through Non-HAL API.
          */
         public boolean installPacketFilter(String ifName, byte[] filter, SharedLog log) {
-            try {
-                NetworkStackUtils.installPacketFilter(ifName, filter);
-                return true;
-            } catch (ErrnoException e) {
-                log.e("[Non-HAL API] Failed to install packet filter", e);
-                return false;
-            }
+            return ApfController.installPacketFilter(ifName, filter, log);
         }
 
         /**
          * Read the packet filter RAM from the specified interface through Non-HAL API.
          */
         public boolean readPacketFilterRam(String ifName, byte[] output, SharedLog log) {
-            try {
-                return NetworkStackUtils.readPacketFilterRam(ifName, output);
-            } catch (ErrnoException e) {
-                log.e("[Non-HAL API] Failed to read packet filter RAM", e);
-                return false;
-            }
+            return ApfController.readPacketFilterRam(ifName, output, log);
         }
 
         /**
@@ -2774,12 +2756,16 @@ public class IpClient extends StateMachine {
                 >= mNudFailureCountDailyThreshold;
     }
 
+    private static boolean shouldSuppressNudFailure(int event) {
+        return event == NETWORK_EVENT_NUD_FAILURE_ORGANIC;
+    }
+
     private void maybeStoreNudFailureToDatabase(final NudEventType type) {
         if (!mIgnoreNudFailureEnabled) return;
-        final int event = IpReachabilityMonitor.nudEventTypeToNetworkEvent(type);
+        final int event = nudEventTypeToNetworkEvent(type);
         // So far only NUD failure events due to organic kernel check are stored, which can be
         // expanded to other causes later if necessary.
-        if (event != NETWORK_EVENT_NUD_FAILURE_ORGANIC) return;
+        if (!shouldSuppressNudFailure(event)) return;
         if (shouldStopWritingNudFailureEventToDatabase()) return;
 
         final long now = System.currentTimeMillis();
@@ -2810,8 +2796,9 @@ public class IpClient extends StateMachine {
                         @Override
                         public void notifyLost(String logMsg, NudEventType type) {
                             maybeStoreNudFailureToDatabase(type);
-                            // TODO: only ignore the organic NUD failures.
-                            if (mIgnoreNudFailure) {
+                            // Ignore only organic NUD failures if too many on a broken network.
+                            final int event = nudEventTypeToNetworkEvent(type);
+                            if (mIgnoreNudFailure && shouldSuppressNudFailure(event)) {
                                 mIpProvisioningMetrics.incrementIgnoredNudFailureCount();
                                 return;
                             }
@@ -3357,6 +3344,11 @@ public class IpClient extends StateMachine {
             if (readyToProceed()) {
                 deferMessage(obtainMessage(CMD_ADDRESSES_CLEARED));
             } else {
+                TerribleErrorLog.logTerribleError(
+                        NetworkStackStatsLog::write,
+                        "There should not be any IP address left in LinkProperties now",
+                        NetworkStackStatsLog.CORE_NETWORKING_TERRIBLE_ERROR_OCCURRED,
+                        NetworkStackStatsLog.CORE_NETWORKING_TERRIBLE_ERROR_OCCURRED__ERROR_TYPE__TYPE_IP_ADDRESS_LEFT_IN_LINKPROPERTIES);
                 // Clear all IPv4 and IPv6 before proceeding to RunningState.
                 // Clean up any leftover state from an abnormal exit from
                 // tethering or during an IpClient restart.
@@ -3656,11 +3648,6 @@ public class IpClient extends StateMachine {
                         IpManagerEvent.ERROR_STARTING_IPREACHABILITYMONITOR);
                 enqueueJumpToStoppingState(DisconnectCode.DC_ERROR_STARTING_IPREACHABILITYMONITOR);
                 return;
-            }
-
-            // TODO: start the Dhcp6AddrRegTracker until M or O flag is detected.
-            if (mDhcp6AddressRegistrationEnabled) {
-                mDhcp6AddrRegTracker.start(mInterfaceParams, mLinkProperties);
             }
         }
 
@@ -4074,9 +4061,9 @@ public class IpClient extends StateMachine {
                     break;
 
                 case CMD_DHCP6_ADDR_REG_START:
-                    // TODO: fix M / O bit detection and start address registration tracker here.
-                    // This has not been working reliably across different kernels.
-                    Log.i(mTag, "M or O bit detected");
+                    if (mDhcp6AddressRegistrationEnabled) {
+                        mDhcp6AddrRegTracker.start(mInterfaceParams, mLinkProperties);
+                    }
                     break;
 
                 case Dhcp6Client.CMD_DHCP6_RESULT:
