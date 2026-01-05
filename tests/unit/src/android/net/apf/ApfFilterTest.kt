@@ -989,7 +989,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv4 TCP destination port 1111:
         /*
@@ -1149,7 +1149,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv4 TCP source port 3333:
         /*
@@ -1309,7 +1309,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv4 UDP destination port 5555:
         /*
@@ -1466,7 +1466,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv4 UDP source port 7777:
         /*
@@ -1623,7 +1623,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv6 TCP destination port 1111:
         /*
@@ -1784,7 +1784,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv6 TCP source port 3333:
         /*
@@ -1945,7 +1945,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv6 UDP destination port 5555:
         /*
@@ -2106,7 +2106,7 @@ class ApfFilterTest {
 
         val apfFilter = getLowPowerStandbyPortsFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
-        var pkt : String
+        var pkt: String
 
         // Using scapy to generate a small packet using IPv6 UDP source port 7777:
         /*
@@ -3693,6 +3693,43 @@ class ApfFilterTest {
 
     @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     @Test
+    fun testInterfaceMtuUpdate() {
+        val apfFilter = getMldApfFilter(loIfParamsWithSmallMtu)
+        var program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
+        // Using scapy to generate MLDv2 general query
+        //  ether = Ether(src='00:11:22:33:44:55', dst='33:33:00:00:00:01')
+        //  ipv6 = IPv6(src='fe80::fc01:83ff:fea6:3712', dst='ff02::1', hlim=1)
+        //  hopOpts = IPv6ExtHdrHopByHop(options=[RouterAlert(otype=5)])
+        //  mld = ICMPv6MLQuery2()
+        //  pkt = ether/ipv6/hopOpts/mld
+        var pkt = """
+            33330000000100112233445586dd6000000000240001fe80000000000000fc0183fffea63712ff02000
+            00000000000000000000000013a000502000001008200a3592710000000000000000000000000000000
+            00000000000000
+        """.replace("\\s+".toRegex(), "").trim()
+        ApfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            PASSED_DUE_TO_REPLY_OVER_MTU
+        )
+
+        val lp = LinkProperties()
+        val ipv6LinkAddress = LinkAddress(hostLinkLocalIpv6Address, 64)
+        lp.addLinkAddress(ipv6LinkAddress)
+        lp.mtu = 1500
+        apfFilter.setLinkProperties(lp)
+        program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        ApfTestHelpers.verifyProgramRun(
+            apfFilter.mApfVersionSupported,
+            program,
+            HexDump.hexStringToByteArray(pkt),
+            DROPPED_IPV6_MLD_V2_GENERAL_QUERY_REPLIED
+        )
+    }
+
+    @IgnoreUpTo(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    @Test
     fun testMldV1GroupSpecificQueryPassed() {
         val apfFilter = getMldApfFilter()
         val program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 3)
@@ -4288,6 +4325,35 @@ class ApfFilterTest {
             apfInterpreterVersion,
             program,
             HexDump.hexStringToByteArray(ra2),
+            DROPPED_RA
+        )
+    }
+
+    @Test
+    fun testRaFilterHandleTrailingBytes() {
+        val apfFilter = getApfFilter()
+        ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        val lp = LinkProperties()
+        for (addr in hostIpv6Addresses) {
+            lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(addr), 64))
+        }
+        apfFilter.setLinkProperties(lp)
+        var program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        val ra1 = """
+            333300000001AEBCB5DBD73D86DD6006040000483AFFFE80000000000000148EB886702C4958FF0
+            200000000000000000000000000018600A212000200000000000000000000030440C00000070800
+            00070800000000FDDA4D9CFFBBAF4F00000000000000001802400000000708FD86DCCA90BF00000
+            101AEBCB5DBD73DA3E2806D192AD1DCFDDE15A1FB7CB0706412244283C86C8297229037AF0D1505
+        """.replace("\\s+".toRegex(), "").trim()
+        val ra1Bytes = HexDump.hexStringToByteArray(ra1)
+        Os.write(raWriterSocket, ra1Bytes, 0, ra1Bytes.size)
+
+        program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+
+        ApfTestHelpers.verifyProgramRun(
+            apfInterpreterVersion,
+            program,
+            ra1Bytes,
             DROPPED_RA
         )
     }
