@@ -25,6 +25,7 @@ import static com.android.net.module.util.NetworkStackConstants.TYPE_SRV;
 import static com.android.net.module.util.NetworkStackConstants.TYPE_TXT;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.RequiresApi;
 import android.net.nsd.OffloadServiceInfo;
 import android.os.Build;
@@ -39,6 +40,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -54,6 +56,23 @@ public class ApfMdnsUtils {
         public MdnsRules(List<MdnsOffloadRule> offloadRules, List<MdnsOffloadRule> filterRules) {
             this.offloadRules = offloadRules;
             this.filterRules = filterRules;
+        }
+
+        @Override
+        public boolean equals(@Nullable Object obj) {
+            if (this == obj) {
+                return true;
+            }
+            if (!(obj instanceof MdnsRules other)) {
+                return false;
+            }
+            return Objects.equals(this.offloadRules, other.offloadRules)
+                && Objects.equals(this.filterRules, other.filterRules);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(offloadRules, filterRules);
         }
     }
 
@@ -297,7 +316,7 @@ public class ApfMdnsUtils {
      */
     @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
     @NonNull
-    public static MdnsRules extractReplyRule(
+    public static MdnsRules extractRules(
             @NonNull List<OffloadServiceInfo> offloadServiceInfos) throws IOException {
         final List<OffloadServiceInfo> sortedOffloadServiceInfos =
                 new ArrayList<>(offloadServiceInfos);
@@ -310,10 +329,14 @@ public class ApfMdnsUtils {
         final List<MdnsOffloadRule> filterRules = new ArrayList<>();
         final Set<MdnsOffloadRule.Matcher> allOffloadMatchers = new ArraySet<>();
         final Set<MdnsOffloadRule.Matcher> allFilterMatchers = new ArraySet<>();
+        // For a service being advertised in the probing stage, both OFFLOAD_TYPE_REPLY and
+        // OFFLOAD_TYPE_FILTER_REPLIES offload types can be enabled at the same time.
         for (OffloadServiceInfo info : sortedOffloadServiceInfos) {
             if (isOffloadTypeMatched(info, OFFLOAD_TYPE_REPLY)) {
                 processOffloadRules(offloadRules, allOffloadMatchers, info);
-            } else if (isOffloadTypeMatched(info, OFFLOAD_TYPE_FILTER_REPLIES)) {
+            }
+
+            if (isOffloadTypeMatched(info, OFFLOAD_TYPE_FILTER_REPLIES)) {
                 processFilterRules(filterRules, allFilterMatchers, info);
             }
         }
