@@ -16,9 +16,11 @@
 package android.net.apf
 
 import android.net.apf.ApfMdnsOffloadEngine.Callback
-import android.net.apf.ApfMdnsUtils.extractReplyRule
+import android.net.apf.ApfMdnsUtils.extractRules
 import android.net.nsd.NsdManager
 import android.net.nsd.OffloadEngine
+import android.net.nsd.OffloadEngine.OFFLOAD_TYPE_FILTER_REPLIES
+import android.net.nsd.OffloadEngine.OFFLOAD_TYPE_REPLY
 import android.net.nsd.OffloadServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -65,6 +67,7 @@ class ApfMdnsOffloadEngineTest {
 
     private val interfaceName = "test_interface"
 
+    private val offloadType = OFFLOAD_TYPE_REPLY or OFFLOAD_TYPE_FILTER_REPLIES
     @Mock
     private lateinit var nsdManager: NsdManager
 
@@ -89,6 +92,7 @@ class ApfMdnsOffloadEngineTest {
                 handler,
                 nsdManager,
                 callback,
+                offloadType,
                 false /* skipMdnsRecordWithoutPriority */
             )
         apfOffloadEngine.registerOffloadEngine()
@@ -124,17 +128,17 @@ class ApfMdnsOffloadEngineTest {
             OffloadEngine.OFFLOAD_TYPE_REPLY.toLong()
         )
         visibleOnHandlerThread(handler) { apfOffloadEngine.onOffloadServiceUpdated(info1) }
-        verify(callback).onOffloadRulesUpdated(eq(extractReplyRule(listOf(info1)).offloadRules))
+        verify(callback).onOffloadRulesUpdated(eq(extractRules(listOf(info1))))
         visibleOnHandlerThread(handler) { apfOffloadEngine.onOffloadServiceUpdated(info2) }
         verify(
             callback
-        ).onOffloadRulesUpdated(eq(extractReplyRule(listOf(info1, info2)).offloadRules))
+        ).onOffloadRulesUpdated(eq(extractRules(listOf(info1, info2))))
         visibleOnHandlerThread(handler) { apfOffloadEngine.onOffloadServiceUpdated(updatedInfo1) }
         verify(callback).onOffloadRulesUpdated(
-            eq(extractReplyRule(listOf(info2, updatedInfo1)).offloadRules)
+            eq(extractRules(listOf(info2, updatedInfo1)))
         )
         visibleOnHandlerThread(handler) { apfOffloadEngine.onOffloadServiceRemoved(updatedInfo1) }
-        verify(callback).onOffloadRulesUpdated(eq(extractReplyRule(listOf(info2)).offloadRules))
+        verify(callback).onOffloadRulesUpdated(eq(extractRules(listOf(info2))))
 
         visibleOnHandlerThread(handler) { apfOffloadEngine.unregisterOffloadEngine() }
         verify(nsdManager).unregisterOffloadEngine(eq(apfOffloadEngine))
@@ -149,6 +153,7 @@ class ApfMdnsOffloadEngineTest {
                 handler,
                 nsdManager,
                 callback,
+                offloadType,
                 true /* skipMdnsRecordWithoutPriority */
             )
         apfOffloadEngine.registerOffloadEngine()
@@ -180,14 +185,14 @@ class ApfMdnsOffloadEngineTest {
                 infoWithoutPriority
             )
         }
-        verify(callback).onOffloadRulesUpdated(eq(extractReplyRule(listOf()).offloadRules))
+        verify(callback).onOffloadRulesUpdated(eq(extractRules(listOf())))
         visibleOnHandlerThread(handler) {
             apfOffloadEngine.onOffloadServiceUpdated(
                 infoWithPriority
             )
         }
         verify(callback).onOffloadRulesUpdated(
-            eq(extractReplyRule(listOf(infoWithPriority)).offloadRules)
+            eq(extractRules(listOf(infoWithPriority)))
         )
     }
 
@@ -200,6 +205,7 @@ class ApfMdnsOffloadEngineTest {
                 handler,
                 nsdManager,
                 callback,
+                offloadType,
                 false /* skipMdnsRecordWithoutPriority */
             )
         apfOffloadEngine.registerOffloadEngine()
