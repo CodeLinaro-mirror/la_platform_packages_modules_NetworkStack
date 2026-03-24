@@ -16,10 +16,13 @@
 
 package com.android.server.connectivity;
 
+import static android.content.Context.RECEIVER_NOT_EXPORTED;
 import static android.content.Intent.ACTION_CONFIGURATION_CHANGED;
 import static android.net.CaptivePortal.APP_RETURN_DISMISSED;
 import static android.net.CaptivePortal.APP_RETURN_UNWANTED;
 import static android.net.CaptivePortal.APP_RETURN_WANTED_AS_IS;
+import static android.net.ConnectivityDiagnosticsManager.DataStallReport.DETECTION_METHOD_DNS_EVENTS;
+import static android.net.ConnectivityDiagnosticsManager.DataStallReport.DETECTION_METHOD_TCP_METRICS;
 import static android.net.ConnectivityManager.EXTRA_CAPTIVE_PORTAL_PROBE_SPEC;
 import static android.net.ConnectivityManager.EXTRA_CAPTIVE_PORTAL_URL;
 import static android.net.DnsResolver.FLAG_EMPTY;
@@ -40,6 +43,7 @@ import static android.net.INetworkMonitor.NETWORK_VALIDATION_RESULT_VALID;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED;
+import static android.net.NetworkCapabilities.TRANSPORT_TEST;
 import static android.net.captiveportal.CaptivePortalProbeSpec.parseCaptivePortalProbeSpecs;
 import static android.net.metrics.ValidationProbeEvent.DNS_FAILURE;
 import static android.net.metrics.ValidationProbeEvent.DNS_SUCCESS;
@@ -71,10 +75,6 @@ import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_POR
 import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_PORTAL_HTTPS_URL;
 import static com.android.net.module.util.NetworkStackConstants.TEST_CAPTIVE_PORTAL_HTTP_URL;
 import static com.android.net.module.util.NetworkStackConstants.TEST_URL_EXPIRATION_TIME;
-import static com.android.networkstack.apishim.ConstantsShim.DETECTION_METHOD_DNS_EVENTS;
-import static com.android.networkstack.apishim.ConstantsShim.DETECTION_METHOD_TCP_METRICS;
-import static com.android.networkstack.apishim.ConstantsShim.RECEIVER_NOT_EXPORTED;
-import static com.android.networkstack.apishim.ConstantsShim.TRANSPORT_TEST;
 import static com.android.networkstack.metrics.NetworkStackStatsLog.CORE_NETWORKING_CRITICAL_COUNTS_EVENT_OCCURRED;
 import static com.android.networkstack.metrics.NetworkStackStatsLog.CORE_NETWORKING_CRITICAL_COUNTS_EVENT_OCCURRED__EVENT_TYPE__CRITICAL_COUNTS_EVENT_TYPE_CAPTIVE_APP_NOT_FOUND;
 import static com.android.networkstack.util.DnsUtils.PRIVATE_DNS_PROBE_HOST_SUFFIX;
@@ -114,6 +114,7 @@ import android.net.DnsResolver;
 import android.net.INetworkMonitorCallbacks;
 import android.net.LinkProperties;
 import android.net.Network;
+import android.net.NetworkAgentConfig;
 import android.net.NetworkCapabilities;
 import android.net.NetworkTestResultParcelable;
 import android.net.ProxyInfo;
@@ -174,13 +175,7 @@ import com.android.net.module.util.NetworkStackConstants;
 import com.android.net.module.util.SharedLog;
 import com.android.networkstack.NetworkStackNotifier;
 import com.android.networkstack.R;
-import com.android.networkstack.apishim.NetworkAgentConfigShimImpl;
-import com.android.networkstack.apishim.NetworkInformationShimImpl;
-import com.android.networkstack.apishim.api29.ConstantsShim;
-import com.android.networkstack.apishim.common.NetworkAgentConfigShim;
-import com.android.networkstack.apishim.common.NetworkInformationShim;
-import com.android.networkstack.apishim.common.ShimUtils;
-import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
+import com.android.networkstack.flags.Flags;
 import com.android.networkstack.metrics.DataStallDetectionStats;
 import com.android.networkstack.metrics.DataStallStatsUtils;
 import com.android.networkstack.metrics.NetworkStackStatsLog;
@@ -518,7 +513,7 @@ public class NetworkMonitor extends StateMachine {
     private final AtomicInteger mNextEvaluatingBandwidthThreadId = new AtomicInteger(1);
 
     @NonNull
-    private NetworkAgentConfigShim mNetworkAgentConfig;
+    private NetworkAgentConfig mNetworkAgentConfig;
     @NonNull
     private NetworkCapabilities mNetworkCapabilities;
     @NonNull
@@ -600,9 +595,7 @@ public class NetworkMonitor extends StateMachine {
     private final boolean mReevaluateWhenResumeEnabled;
     private final boolean mAsyncPrivdnsResolutionEnabled;
     private final boolean mUseCapportDataInFallBackEnabled;
-
-    @NonNull
-    private final NetworkInformationShim mInfoShim = NetworkInformationShimImpl.newInstance();
+    private final boolean mRedactVenueInfoUrl;
 
     // The validation metrics are accessed by individual probe threads, and by the StateMachine
     // thread. All accesses must be synchronized to make sure the StateMachine thread can see
@@ -773,7 +766,7 @@ public class NetworkMonitor extends StateMachine {
         // even before notifyNetworkConnected.
         mLinkProperties = new LinkProperties();
         mNetworkCapabilities = new NetworkCapabilities(null);
-        mNetworkAgentConfig = NetworkAgentConfigShimImpl.newInstance(null);
+        mNetworkAgentConfig = new NetworkAgentConfig.Builder().build();
 
         // For DdrTracker that can safely update SVCB lookup results itself when the lookup
         // completes. The callback is called inline from onAnswer, which is already posted to
@@ -785,6 +778,8 @@ public class NetworkMonitor extends StateMachine {
                 getHandler()::post,
                 result -> notifyPrivateDnsConfigResolved(result),  // Run inline on handler.
                 mValidationLogs);
+
+        mRedactVenueInfoUrl = mDependencies.networkMonitorRedactVenueInfoUrl();
     }
 
     /**
@@ -850,7 +845,8 @@ public class NetworkMonitor extends StateMachine {
 
     private void updateConnectedNetworkAttributes(Message connectedMsg) {
         final NetworkMonitorParameters params = (NetworkMonitorParameters) connectedMsg.obj;
-        mNetworkAgentConfig = NetworkAgentConfigShimImpl.newInstance(params.networkAgentConfig);
+        mNetworkAgentConfig = params.networkAgentConfig != null
+                ? params.networkAgentConfig : new NetworkAgentConfig.Builder().build();
         mLinkProperties = params.linkProperties;
         mNetworkCapabilities = params.networkCapabilities;
         suppressNotificationIfNetworkRestricted();
@@ -913,8 +909,10 @@ public class NetworkMonitor extends StateMachine {
     private boolean isValidationRequired() {
         final boolean dunValidationRequired = isAtLeastU()
                 || mContext.getResources().getBoolean(R.bool.config_validate_dun_networks);
+        final boolean vpnValidationRequired = SdkLevel.isAtLeastT()
+                && mNetworkAgentConfig.isVpnValidationRequired();
         return NetworkMonitorUtils.isValidationRequired(dunValidationRequired,
-                mNetworkAgentConfig.isVpnValidationRequired(), mNetworkCapabilities);
+                vpnValidationRequired, mNetworkCapabilities);
     }
 
     private boolean isDataStallDetectionRequired() {
@@ -1226,9 +1224,9 @@ public class NetworkMonitor extends StateMachine {
                     maybeDisableHttpsProbing(true /* acceptPartial */);
                     break;
                 case EVENT_LINK_PROPERTIES_CHANGED:
-                    final Uri oldCapportUrl = getCaptivePortalApiUrl(mLinkProperties);
+                    final Uri oldCapportUrl = mLinkProperties.getCaptivePortalApiUrl();
                     mLinkProperties = (LinkProperties) message.obj;
-                    final Uri newCapportUrl = getCaptivePortalApiUrl(mLinkProperties);
+                    final Uri newCapportUrl = mLinkProperties.getCaptivePortalApiUrl();
                     if (!Objects.equals(oldCapportUrl, newCapportUrl)) {
                         sendMessage(CMD_FORCE_REEVALUATION, NO_UID, 0);
                     }
@@ -1307,8 +1305,8 @@ public class NetworkMonitor extends StateMachine {
             final NetworkCapabilities newCap, final NetworkCapabilities oldCap) {
         return !newCap.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 && isValidationRequired()
-                && !Objects.equals(mInfoShim.getUnderlyingNetworks(newCap),
-                mInfoShim.getUnderlyingNetworks(oldCap));
+                && !Objects.equals(newCap.getUnderlyingNetworks(),
+                oldCap.getUnderlyingNetworks());
     }
 
     // Being in the ValidatedState State indicates a Network is:
@@ -1564,7 +1562,7 @@ public class NetworkMonitor extends StateMachine {
             }
             mReevaluateDelayMs = INITIAL_REEVALUATE_DELAY_MS;
             mEvaluateAttempts = 0;
-            mEvaluatingCapportUrl = getCaptivePortalApiUrl(mLinkProperties);
+            mEvaluatingCapportUrl = mLinkProperties.getCaptivePortalApiUrl();
             // Reset all current probe results to zero, but retain current validation state until
             // validation succeeds or fails.
             mEvaluationState.clearProbeResults();
@@ -1646,7 +1644,7 @@ public class NetworkMonitor extends StateMachine {
             // IGNORE_REEVALUATE_ATTEMPTS are made.
             return mEvaluateAttempts >= IGNORE_REEVALUATE_ATTEMPTS
                     || !Objects.equals(
-                            mEvaluatingCapportUrl, getCaptivePortalApiUrl(mLinkProperties));
+                            mEvaluatingCapportUrl, mLinkProperties.getCaptivePortalApiUrl());
         }
 
         @Override
@@ -3200,8 +3198,7 @@ public class NetworkMonitor extends StateMachine {
         final CaptivePortalProbeResult probeResult;
         if (probeSpec == null) {
             if (CaptivePortalProbeResult.isPortalCode(httpResponseCode)
-                    && TextUtils.isEmpty(redirectUrl)
-                    && ShimUtils.isAtLeastS()) {
+                    && TextUtils.isEmpty(redirectUrl)) {
                 // If a portal is a non-redirect portal (often portals that return HTTP 200 with a
                 // login page for all HTTP requests), report the probe URL as the login URL starting
                 // from S (b/172048052). This avoids breaking assumptions that
@@ -3422,11 +3419,6 @@ public class NetworkMonitor extends StateMachine {
             } catch (JSONException e) {
                 validationLog("Could not parse capport API JSON: " + e.getMessage());
                 return null;
-            } catch (UnsupportedApiLevelException e) {
-                // This should never happen because LinkProperties would not have a capport URL
-                // before R.
-                validationLog("Platform API too low to support capport API");
-                return null;
             }
         }
 
@@ -3494,7 +3486,7 @@ public class NetworkMonitor extends StateMachine {
         mDependencies.onExecutorServiceCreated(executor);
         final CompletionService<CaptivePortalProbeResult> ecs =
                 new ExecutorCompletionService<CaptivePortalProbeResult>(executor);
-        final Uri capportApiUrl = getCaptivePortalApiUrl(mLinkProperties);
+        final Uri capportApiUrl = mLinkProperties.getCaptivePortalApiUrl();
         final List<Future<CaptivePortalProbeResult>> futures = new ArrayList<>();
 
         try {
@@ -3628,7 +3620,9 @@ public class NetworkMonitor extends StateMachine {
 
     private void reportProbeResult(@NonNull CaptivePortalProbeResult res) {
         if (res instanceof CapportApiProbeResult) {
-            maybeReportCaptivePortalData(((CapportApiProbeResult) res).getCaptivePortalData());
+            CaptivePortalData capportData =
+                    ((CapportApiProbeResult) res).getCaptivePortalData();
+            maybeReportCaptivePortalData(capportData, res.isPortal());
         }
 
         // This is not a if-else case since partial connectivity will concluded from both HTTP and
@@ -3649,7 +3643,7 @@ public class NetworkMonitor extends StateMachine {
         // it shortcuts the latch immediately by forcing the count to 0.
         final CountDownLatch latch = new CountDownLatch(2);
 
-        final Uri capportApiUrl = getCaptivePortalApiUrl(mLinkProperties);
+        final Uri capportApiUrl = mLinkProperties.getCaptivePortalApiUrl();
         final ProbeThread httpsProbe = new ProbeThread(latch, properties, proxy, httpsUrl,
                 ValidationProbeEvent.PROBE_HTTPS, capportApiUrl);
         final ProbeThread httpProbe = new ProbeThread(latch, properties, proxy, httpUrl,
@@ -3672,12 +3666,12 @@ public class NetworkMonitor extends StateMachine {
 
         // Look for a conclusive probe result first.
         if (isConclusiveResult(httpResult, capportApiUrl)) {
-            reportProbeResult(httpProbe.result());
+            reportProbeResult(httpResult);
             return httpResult;
         }
 
         if (isConclusiveResult(httpsResult, capportApiUrl)) {
-            reportProbeResult(httpsProbe.result());
+            reportProbeResult(httpsResult);
             return httpsResult;
         }
         // Consider a DNS response with a private IP address on the HTTP probe as an indication that
@@ -3702,7 +3696,7 @@ public class NetworkMonitor extends StateMachine {
                         && httpResult instanceof CapportApiProbeResult) {
                     final CaptivePortalData capportData =
                             ((CapportApiProbeResult) httpResult).getCaptivePortalData();
-                    maybeReportCaptivePortalData(capportData);
+                    maybeReportCaptivePortalData(capportData, true);
                     fallbackProbeResult = new CapportApiProbeResult(fallbackProbeResult,
                             capportData);
                 }
@@ -3872,6 +3866,13 @@ public class NetworkMonitor extends StateMachine {
 
         boolean isFeatureSupported(@NonNull Context context, long feature) {
             return DeviceConfigUtils.isFeatureSupported(context, feature);
+        }
+
+        /**
+         * Check whether to redact venue info URL in captive portal data.
+         */
+        public boolean networkMonitorRedactVenueInfoUrl() {
+            return Flags.networkMonitorRedactVenueInfoUrl();
         }
 
         /**
@@ -4253,13 +4254,18 @@ public class NetworkMonitor extends StateMachine {
         mEvaluationState.noteProbeResult(probeResult, succeeded);
     }
 
-    private void maybeReportCaptivePortalData(@Nullable CaptivePortalData data) {
+    private void maybeReportCaptivePortalData(@Nullable CaptivePortalData data,
+            boolean isPortalEvaluationResult) {
         // Do not clear data even if it is null: access points should not stop serving the API, so
         // if the API disappears this is treated as a temporary failure, and previous data should
         // remain valid.
         if (data == null) return;
+        CaptivePortalData redactedData = data;
+        if (isPortalEvaluationResult && mRedactVenueInfoUrl) {
+            redactedData = CaptivePortalDataUtils.redactVenueInfoUrl(data);
+        }
         try {
-            mCallback.notifyCaptivePortalDataChanged(data);
+            mCallback.notifyCaptivePortalDataChanged(redactedData);
         } catch (RemoteException | RuntimeException e) {
             // TODO: stop catching RuntimeException once all mainline devices use the tethering APEX
             Log.e(TAG, "Error notifying ConnectivityService of new capport data", e);
@@ -4296,10 +4302,6 @@ public class NetworkMonitor extends StateMachine {
                 ? new DnsStallDetector(threshold) : null;
     }
 
-    private static Uri getCaptivePortalApiUrl(LinkProperties lp) {
-        return NetworkInformationShimImpl.newInstance().getCaptivePortalApiUrl(lp);
-    }
-
     /**
      * Check if the network is captive with terms and conditions page
      * @return true if network is captive with T&C page, false otherwise
@@ -4310,7 +4312,7 @@ public class NetworkMonitor extends StateMachine {
                 && !TextUtils.isEmpty(captivePortalDataShim.getUserPortalUrl().toString())
                 && captivePortalDataShim.isCaptive()
                 && captivePortalDataShim.getUserPortalUrlSource()
-                == ConstantsShim.CAPTIVE_PORTAL_DATA_SOURCE_PASSPOINT;
+                == CaptivePortalData.CAPTIVE_PORTAL_DATA_SOURCE_PASSPOINT;
     }
 
     private boolean checkAndRenewResourceConfig() {
