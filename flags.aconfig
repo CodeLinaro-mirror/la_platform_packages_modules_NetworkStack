@@ -21,3 +21,17 @@ flag {
     description: "Support APF mDNS reply filter"
     bug: "451885799"
 }
+
+flag {
+    name: "network_monitor_redact_venue_info_url"
+    namespace: "com_android_networkstack"
+    description: "Redact venue info URL in NetworkMonitor when closed portal is detected"
+    bug: "429004668"
+}
+
+flag {
+    name: "netlink_no_timeout"
+    namespace: "com_android_networkstack"
+    description: "Disable timeout for netlink API calls."
+    bug: "455999579"
+}

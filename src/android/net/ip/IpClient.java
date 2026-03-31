@@ -84,8 +84,6 @@ import static com.android.net.module.util.NetworkStackConstants.ETHER_BROADCAST;
 import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_ALL_ROUTERS_MULTICAST;
 import static com.android.net.module.util.NetworkStackConstants.RFC7421_PREFIX_LENGTH;
 import static com.android.net.module.util.NetworkStackConstants.VENDOR_SPECIFIC_IE_ID;
-import static com.android.networkstack.apishim.ConstantsShim.IFA_F_MANAGETEMPADDR;
-import static com.android.networkstack.apishim.ConstantsShim.IFA_F_NOPREFIXROUTE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_ENABLE;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_ARP_OFFLOAD;
 import static com.android.networkstack.util.NetworkStackUtils.APF_HANDLE_IGMP_OFFLOAD;
@@ -194,9 +192,6 @@ import com.android.net.module.util.ip.InterfaceController;
 import com.android.net.module.util.netlink.NetlinkUtils;
 import com.android.net.module.util.structs.IaPrefixOption;
 import com.android.networkstack.R;
-import com.android.networkstack.apishim.NetworkInformationShimImpl;
-import com.android.networkstack.apishim.SocketUtilsShimImpl;
-import com.android.networkstack.apishim.common.NetworkInformationShim;
 import com.android.networkstack.mainline.beta.Flags;
 import com.android.networkstack.metrics.IpProvisioningMetrics;
 import com.android.networkstack.metrics.NetworkQuirkMetrics;
@@ -268,7 +263,6 @@ public class IpClient extends StateMachine {
     // This map holds Apf logs.
     private static final ConcurrentHashMap<String, SharedLog> sApfLogs = new ConcurrentHashMap<>();
     private final NetworkStackIpMemoryStore mIpMemoryStore;
-    private final NetworkInformationShim mShim = NetworkInformationShimImpl.newInstance();
     private final IpProvisioningMetrics mIpProvisioningMetrics = new IpProvisioningMetrics();
     private final NetworkQuirkMetrics mNetworkQuirkMetrics;
 
@@ -335,20 +329,16 @@ public class IpClient extends StateMachine {
         private final SharedLog mLog;
         @NonNull
         private final SharedLog mApfLog;
-        @NonNull
-        private final NetworkInformationShim mShim;
 
         private final boolean mApfDebug;
         private final Random mRandom = new Random();
 
         @VisibleForTesting
         protected IpClientCallbacksWrapper(IIpClientCallbacks callback, @NonNull SharedLog log,
-                @NonNull SharedLog apfLog, @NonNull NetworkInformationShim shim,
-                boolean apfDebug) {
+                @NonNull SharedLog apfLog, boolean apfDebug) {
             mCallback = callback;
             mLog = log;
             mApfLog = apfLog;
-            mShim = shim;
             mApfDebug = apfDebug;
         }
 
@@ -411,7 +401,7 @@ public class IpClient extends StateMachine {
                         NetworkStackStatsLog.CORE_NETWORKING_TERRIBLE_ERROR_OCCURRED__ERROR_TYPE__TYPE_UNKNOWN);
             }
             try {
-                mCallback.onProvisioningSuccess(mShim.makeSensitiveFieldsParcelingCopy(newLp));
+                mCallback.onProvisioningSuccess(new LinkProperties(newLp, true));
             } catch (RemoteException e) {
                 log("Failed to call onProvisioningSuccess", e);
             }
@@ -423,7 +413,7 @@ public class IpClient extends StateMachine {
         public void onProvisioningFailure(LinkProperties newLp) {
             log("onProvisioningFailure({" + newLp + "})");
             try {
-                mCallback.onProvisioningFailure(mShim.makeSensitiveFieldsParcelingCopy(newLp));
+                mCallback.onProvisioningFailure(new LinkProperties(newLp, true));
             } catch (RemoteException e) {
                 log("Failed to call onProvisioningFailure", e);
             }
@@ -435,7 +425,7 @@ public class IpClient extends StateMachine {
         public void onLinkPropertiesChange(LinkProperties newLp) {
             log("onLinkPropertiesChange({" + newLp + "})");
             try {
-                mCallback.onLinkPropertiesChange(mShim.makeSensitiveFieldsParcelingCopy(newLp));
+                mCallback.onLinkPropertiesChange(new LinkProperties(newLp, true));
             } catch (RemoteException e) {
                 log("Failed to call onLinkPropertiesChange", e);
             }
@@ -676,6 +666,9 @@ public class IpClient extends StateMachine {
 
     // IpClient shares a handler with DhcpClient: commands must not overlap
     public static final int DHCPCLIENT_CMD_BASE = 1000;
+
+    public static final int IFA_F_MANAGETEMPADDR = 0x100;
+    public static final int IFA_F_NOPREFIXROUTE = 0x200;
 
     // IpClient shares a handler with Dhcp6Client: commands must not overlap
     public static final int DHCP6CLIENT_CMD_BASE = 2000;
@@ -1147,7 +1140,7 @@ public class IpClient extends StateMachine {
         mApfLog = sApfLogs.get(mInterfaceName);
         mApfDebug = Log.isLoggable(ApfFilter.class.getSimpleName(), Log.DEBUG);
         mMsgStateLogger = new MessageHandlingLogger();
-        mCallback = new IpClientCallbacksWrapper(callback, mLog, mApfLog, mShim, mApfDebug);
+        mCallback = new IpClientCallbacksWrapper(callback, mLog, mApfLog, mApfDebug);
         mIpClientApfController = new ApfFilter.IApfController() {
             @Override
             public boolean installPacketFilter(byte[] filter, String filterConfig) {
@@ -1196,7 +1189,7 @@ public class IpClient extends StateMachine {
         // affect any behavior until the address registration feature is enabled. When that happens,
         // Dhcp6Client will use control message syscalls to receive DHCPv6 messages with ancillary
         // data, making the code safer to roll out along with mainline beta program.
-        mDhcp6AddressRegistrationEnabled = Flags.dhcpv6AddressRegistration();
+        mDhcp6AddressRegistrationEnabled = true;
         mDhcp6PacketDispatcher = new Dhcp6PacketDispatcher(getHandler(), ifName,
                 mDhcp6AddressRegistrationEnabled /* useControlMessageApi */);
         mDhcp6AddrRegTracker = mDependencies.makeDhcp6AddrRegTracker(
@@ -2168,7 +2161,7 @@ public class IpClient extends StateMachine {
             newLp.addRoute(route);
         }
         addAllReachableDnsServers(newLp, netlinkLinkProperties.getDnsServers());
-        mShim.setNat64Prefix(newLp, mShim.getNat64Prefix(netlinkLinkProperties));
+        newLp.setNat64Prefix(netlinkLinkProperties.getNat64Prefix());
 
         // Check if any link address update from netlink.
         final CompareResult<LinkAddress> results =
@@ -2218,15 +2211,14 @@ public class IpClient extends StateMachine {
             }
 
             if (mDhcpResults.serverAddress != null) {
-                mShim.setDhcpServerAddress(newLp, mDhcpResults.serverAddress);
+                newLp.setDhcpServerAddress(mDhcpResults.serverAddress);
             }
 
             final String capportUrl = mDhcpResults.captivePortalApiUrl;
             // Uri.parse does no syntax check; do a simple check to eliminate garbage.
             // If the URL is still incorrect data fetching will fail later, which is fine.
             if (isParseableUrl(capportUrl)) {
-                NetworkInformationShimImpl.newInstance()
-                        .setCaptivePortalApiUrl(newLp, Uri.parse(capportUrl));
+                newLp.setCaptivePortalApiUrl(Uri.parse(capportUrl));
             }
             // TODO: also look at the IPv6 RA (netlink) for captive portal URL
         }
@@ -2326,7 +2318,7 @@ public class IpClient extends StateMachine {
         final ByteBuffer packet = NeighborAdvertisement.build(mInterfaceParams.macAddr, dstMac,
                 srcIp, dstIp, flags, targetIp);
         final SocketAddress sockAddress =
-                SocketUtilsShimImpl.newInstance().makePacketSocketAddress(ETH_P_IPV6,
+                makePacketSocketAddress(ETH_P_IPV6,
                         mInterfaceParams.index, dstMac.toByteArray());
 
         transmitPacket(packet, sockAddress, "Failed to send Gratuitous Neighbor Advertisement");
@@ -2350,7 +2342,7 @@ public class IpClient extends StateMachine {
         final ByteBuffer packet = NeighborSolicitation.build(mInterfaceParams.macAddr, dstMac,
                 srcIp, dstIp, targetIp);
         final SocketAddress sockAddress =
-                SocketUtilsShimImpl.newInstance().makePacketSocketAddress(ETH_P_IPV6,
+                makePacketSocketAddress(ETH_P_IPV6,
                         mInterfaceParams.index, dstMac.toByteArray());
 
         if (DBG) {

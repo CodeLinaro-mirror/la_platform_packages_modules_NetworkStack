@@ -20,8 +20,7 @@ import android.net.Uri;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
-
-import com.android.networkstack.apishim.common.UnsupportedApiLevelException;
+import androidx.annotation.Nullable;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -56,7 +55,7 @@ public class CaptivePortalDataUtils {
     @NonNull
     public static CaptivePortalData fromJson(JSONObject obj,
             Predicate<String> evaluateCustomTabOptIn)
-            throws JSONException, UnsupportedApiLevelException {
+            throws JSONException {
         final long refreshTimeMs = System.currentTimeMillis();
         final long secondsRemaining = getLongOrDefault(obj, "seconds-remaining", -1L);
         final long millisRemaining = secondsRemaining <= Long.MAX_VALUE / 1000
@@ -81,4 +80,18 @@ public class CaptivePortalDataUtils {
                 .setExpiryTime(expiryTimeMs)
                 .build();
     }
+
+    /**
+     * Redact the venue info URL from the captive portal data if necessary.
+     */
+    @Nullable
+    public static CaptivePortalData redactVenueInfoUrl(CaptivePortalData capportData) {
+        if (capportData == null) {
+            return null;
+        }
+        return new CaptivePortalData.Builder(capportData)
+                .setVenueInfoUrl(null)
+                .build();
+    }
+
 }
