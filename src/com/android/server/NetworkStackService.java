@@ -663,6 +663,10 @@ public class NetworkStackService extends Service {
                 pw.println("        dump APF packet counters.");
                 pw.println("      config");
                 pw.println("        get APF config messages.");
+                pw.println("      support-non-hal-api");
+                pw.println(
+                        "        return \"true\" if the APF non-HAL API is supported, \"false\" "
+                                + "otherwise.");
             }
 
             private void captureShellCommand(
