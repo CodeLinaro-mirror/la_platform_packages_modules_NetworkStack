@@ -655,7 +655,6 @@ public class IpClient extends StateMachine {
         static final String CMD_GET_APF_CAPABILITIES = "capabilities";
         static final String CMD_DUMP_APF_COUNTERS = "dump-counters";
         static final String CMD_GET_APF_CONFIG = "config";
-        static final String CMD_SUPPORT_NON_HAL_API = "support-non-hal-api";
 
         static boolean shouldUpdateDataSnapshot(final String cmd) {
             return cmd.equals(CMD_READ_APF_DATA) || cmd.equals(CMD_DUMP_APF_COUNTERS);
@@ -1756,11 +1755,6 @@ public class IpClient extends StateMachine {
                 if (mApfFilter == null) {
                     // IpClient has either stopped or the interface does not support APF.
                     throw new IllegalStateException("No active APF filter.");
-                }
-                if (ApfShellCommands.CMD_SUPPORT_NON_HAL_API.equals(cmd)) {
-                    result.complete(mDependencies.getApfCapabilities(mInterfaceName, mLog) != null
-                            ? "true" : "false");
-                    return;
                 }
                 switch (cmd) {
                     case ApfShellCommands.CMD_GET_APF_FILTER_STATUS:
