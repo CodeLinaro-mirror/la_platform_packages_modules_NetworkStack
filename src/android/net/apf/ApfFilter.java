@@ -256,6 +256,7 @@ import static com.android.net.module.util.NetworkStackConstants.IPV6_ADDR_NODE_L
 import android.annotation.ChecksSdkIntAtLeast;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresApi;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -269,6 +270,7 @@ import android.net.apf.ApfCounterTracker.Counter;
 import android.net.apf.BaseApfGenerator.IllegalInstructionException;
 import android.net.ip.MulticastReportMonitor;
 import android.net.nsd.NsdManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.os.PowerManager.LowPowerStandbyPortDescription;
@@ -444,13 +446,18 @@ public class ApfFilter {
     private final ApfSessionInfoMetrics mApfSessionInfoMetrics;
     private final NsdManager mNsdManager;
     private final MulticastReportMonitor mMulticastReportMonitor;
-    private final ApfMdnsOffloadEngine mApfMdnsOffloadEngine;
+    private final ApfMdnsOffloadEngine mApfMdnsReplyOffloadEngine;
+    private final ApfMdnsOffloadEngine mApfMdnsFilterOffloadEngine;
     private final List<MdnsOffloadRule> mOffloadRules = new ArrayList<>();
     private final List<MdnsOffloadRule> mFilterRules = new ArrayList<>();
     // The number of mDNS rules requiring APF to transmit a reply and drop the query packet. A
     // value of -1 means all mDNS query packets should be passed; no mDNS query packets will trigger
     // the transmit and reply logic.
     private int mNumOfMdnsRuleToOffload = -1;
+    // Whether to ignore the mDNS reply filter. If the estimated program size of the mDNS reply
+    // filter exceeds the remaining APF RAM, this is set to true to fail-open and pass all mDNS
+    // reply packets.
+    private boolean mMdnsReplyFilterFailOpen = true;
 
     private ApfLowPowerStandbyPortsSubscriber mLowPowerStandbyPortsSubscriber;
     private final ArraySet<Long> mLowPowerStandbyPortsTcpLocal = new ArraySet<>();
@@ -487,6 +494,18 @@ public class ApfFilter {
         }
 
         return powerManager.isDeviceLightIdleMode();
+    }
+
+    private boolean isIgnoreMdnsReplyFilter() {
+        if (!mMulticastFilter) {
+            return true;
+        }
+
+        if (mMdnsReplyFilterFailOpen) {
+            return true;
+        }
+
+        return false;
     }
 
     // Detects doze mode state transitions.
@@ -564,25 +583,16 @@ public class ApfFilter {
         }
     }
 
-    private void maybeUpdateMdnsRules(ApfMdnsUtils.MdnsRules allRules) {
-        if (mHandleMdnsOffload) {
-            mOffloadRules.clear();
-            mOffloadRules.addAll(allRules.offloadRules);
-        }
-
-        if (mHandleMdnsReplyFilter) {
-            mFilterRules.clear();
-            mFilterRules.addAll(allRules.filterRules);
-        }
-
-        if (mHandleMdnsOffload || mHandleMdnsReplyFilter) {
-            installNewProgram();
-        }
+    private void updateMdnsOffloadRules(ApfMdnsUtils.MdnsRules allRules) {
+        mOffloadRules.clear();
+        mOffloadRules.addAll(allRules.offloadRules);
+        installNewProgram();
     }
 
-    private int getOffloadType() {
-        return (mHandleMdnsOffload ? OFFLOAD_TYPE_REPLY : 0)
-            | (mHandleMdnsReplyFilter ? OFFLOAD_TYPE_FILTER_REPLIES : 0);
+    private void updateMdnsFilterRules(ApfMdnsUtils.MdnsRules allRules) {
+        mFilterRules.clear();
+        mFilterRules.addAll(allRules.filterRules);
+        installNewProgram();
     }
 
     @VisibleForTesting
@@ -672,15 +682,33 @@ public class ApfFilter {
 
         mNsdManager = context.getSystemService(NsdManager.class);
         if (enableOffloadEngineRegistration()) {
-            mApfMdnsOffloadEngine = new ApfMdnsOffloadEngine(mInterfaceParams.name, mHandler,
-                    mNsdManager,
-                    this::maybeUpdateMdnsRules,
-                    getOffloadType(),
-                    mSkipMdnsRecordWithoutPriority
-                    );
-            mApfMdnsOffloadEngine.registerOffloadEngine();
+            if (mHandleMdnsOffload) {
+                mApfMdnsReplyOffloadEngine = new ApfMdnsOffloadEngine(mInterfaceParams.name,
+                        mHandler,
+                        mNsdManager,
+                        this::updateMdnsOffloadRules,
+                        OFFLOAD_TYPE_REPLY,
+                        mSkipMdnsRecordWithoutPriority
+                );
+                mApfMdnsReplyOffloadEngine.registerOffloadEngine();
+            } else {
+                mApfMdnsReplyOffloadEngine = null;
+            }
+            if (mHandleMdnsReplyFilter) {
+                mApfMdnsFilterOffloadEngine = new ApfMdnsOffloadEngine(mInterfaceParams.name,
+                        mHandler,
+                        mNsdManager,
+                        this::updateMdnsFilterRules,
+                        OFFLOAD_TYPE_FILTER_REPLIES,
+                        mSkipMdnsRecordWithoutPriority
+                );
+                mApfMdnsFilterOffloadEngine.registerOffloadEngine();
+            } else {
+                mApfMdnsFilterOffloadEngine = null;
+            }
         } else {
-            mApfMdnsOffloadEngine = null;
+            mApfMdnsReplyOffloadEngine = null;
+            mApfMdnsFilterOffloadEngine = null;
         }
 
         mIPv4MulticastAddresses.addAll(
@@ -926,6 +954,15 @@ public class ApfFilter {
         sb.append("low power standby filter: ");
         sb.append(enableHandleLowPowerStandbyPortsFilter() ? "ENABLED" : "DISABLED");
         sb.append(", ");
+        sb.append("mDNS reply filter: ");
+        sb.append("[ ");
+        if (enableMdns4Filter()) {
+            sb.append("Mdns4, ");
+        }
+        if (enableMdns6Filter()) {
+            sb.append("Mdns6, ");
+        }
+        sb.append("], ");
         sb.append("offloads: ");
         sb.append("[ ");
         if (enableArpOffload()) {
@@ -952,14 +989,20 @@ public class ApfFilter {
         if (enableMdns6Offload()) {
             sb.append("Mdns6, ");
         }
-        sb.append("] ");
+        sb.append("], ");
         sb.append("total RAs: ");
         sb.append(mRas.size());
-        sb.append(" filtered RAs: ");
+        sb.append(", ");
+        sb.append("filtered RAs: ");
         sb.append(mNumFilteredRas);
-        sb.append(" mDNSs: ");
+        sb.append(", ");
+        sb.append("mDNS query offload rules: ");
         sb.append(mOffloadRules.size());
-        sb.append(" low power standby ports: ");
+        sb.append(", ");
+        sb.append("mDNS reply filter rules: ");
+        sb.append(mFilterRules.size());
+        sb.append(", ");
+        sb.append("low power standby ports: ");
         sb.append(mLowPowerStandbyPortsTcpLocal.size() + mLowPowerStandbyPortsTcpRemote.size()
                 + mLowPowerStandbyPortsUdpLocal.size() + mLowPowerStandbyPortsUdpRemote.size());
         sb.append(" }");
@@ -2196,15 +2239,13 @@ public class ApfFilter {
      * @param gen the APF generator to generate the filter code
      * @param labelCheckMdnsReplyFilter the label to jump to for checking the mDNS reply filter
      */
-    // TODO: deal with the case where the RAM is not enough
-    //      1. If there's enough RAM then just to filter reply based on the rule.
-    //      2. fail-open to pass all reply packets where the RAM is not enough.
     private void generateMdnsReplyFilter(
             final ApfV6GeneratorBase<?> gen,
             short labelCheckMdnsReplyFilter) throws IllegalInstructionException {
 
         gen.defineLabel(labelCheckMdnsReplyFilter);
-        if (!mMulticastFilter) {
+        // fail-open to pass all reply packets where the RAM is not enough
+        if (!mMulticastFilter || mMdnsReplyFilterFailOpen) {
             gen.addCountAndPass(PASSED_MDNS);
             return;
         }
@@ -4161,6 +4202,20 @@ public class ApfFilter {
         return mOverEstimatedProgramSize;
     }
 
+    private int estimateMdnsReplyFilterSize(boolean failOpen) throws IllegalInstructionException {
+        final ApfV6GeneratorBase<?> gen = (ApfV6GeneratorBase<?>) createApfGenerator();
+        final int before = gen.programLengthOverEstimate();
+        final short label = gen.getUniqueLabel();
+        final boolean oldFailOpen = mMdnsReplyFilterFailOpen;
+        mMdnsReplyFilterFailOpen = failOpen;
+        try {
+            generateMdnsReplyFilter(gen, label);
+        } finally {
+            mMdnsReplyFilterFailOpen = oldFailOpen;
+        }
+        return gen.programLengthOverEstimate() - before;
+    }
+
     private int calcMdnsOffloadProgramSizeOverEstimate(int numOfMdnsRuleToOffload)
             throws IllegalInstructionException {
         ApfV6GeneratorBase<?> gen = (ApfV6GeneratorBase<?>) createApfGenerator();
@@ -4299,13 +4354,19 @@ public class ApfFilter {
             // requirement. These devices are usually on home networks with very chatty mDNS
             // traffic.
             if (enableMdns4Offload() || enableMdns6Offload()) {
+                int reservedMdnsReplyFilterFailOpenSize = 0;
+                if (enableMdns4Filter() || enableMdns6Filter()) {
+                    reservedMdnsReplyFilterFailOpenSize =
+                        estimateMdnsReplyFilterSize(true /* failOpen */);
+                }
                 final int remainSize = mMaximumApfProgramSize - programLengthOverEstimate;
                 mNumOfMdnsRuleToOffload = mOffloadRules.size();
                 int mDnsProgramLengthOverEstimate = 0;
                 for (; mNumOfMdnsRuleToOffload >= -1; --mNumOfMdnsRuleToOffload) {
                     mDnsProgramLengthOverEstimate = calcMdnsOffloadProgramSizeOverEstimate(
                             mNumOfMdnsRuleToOffload);
-                    if (mDnsProgramLengthOverEstimate <= remainSize) {
+                    if ((mDnsProgramLengthOverEstimate + reservedMdnsReplyFilterFailOpenSize)
+                            <= remainSize) {
                         break;
                     }
                 }
@@ -4323,12 +4384,31 @@ public class ApfFilter {
                             + " (clear memory, reason: unable to fail-open for mDNS)");
                     return;
                 }
-
                 programLengthOverEstimate += mDnsProgramLengthOverEstimate;
             } else {
                 mNumOfMdnsRuleToOffload = -1;
             }
 
+            // We prioritize mDNS offload rules over mDNS reply filtering.
+            // The estimation follows a conservative "fail-open" strategy:
+            // we always reserve enough space for a minimal fail-open reply filter when calculating
+            // offload rule capacity.
+            // We first attempt to generate instructions for all reply filter rules;
+            // if the required space exceeds the remaining APF RAM, we fall back to the fail-open
+            // logic to ensure mDNS functionality is never broken, even under memory pressure.
+            if (enableMdns4Filter() || enableMdns6Filter()) {
+                final int fullFilterSize = estimateMdnsReplyFilterSize(false /* failOpen */);
+                if ((programLengthOverEstimate + fullFilterSize) <= mMaximumApfProgramSize) {
+                    mMdnsReplyFilterFailOpen = false;
+                    programLengthOverEstimate += fullFilterSize;
+                } else {
+                    mMdnsReplyFilterFailOpen = true;
+                    programLengthOverEstimate += estimateMdnsReplyFilterSize(true /* failOpen */);
+                    Log.i(TAG, "Program exceeds maximum size, skipping mDNS reply filter");
+                }
+            } else {
+                mMdnsReplyFilterFailOpen = true;
+            }
 
             for (Ra ra : mRas) {
                 // skip filter if it has expired.
@@ -4482,6 +4562,7 @@ public class ApfFilter {
      * Sets the low power standby port exemptions, and installs a new APF program if the current APF
      * program should be updated.
      */
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private void setLowPowerStandbyPorts(@NonNull List<LowPowerStandbyPortDescription> ports) {
         if (mIsApfShutdown) return;
 
@@ -4542,6 +4623,7 @@ public class ApfFilter {
             installNewProgram();
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private static ArraySet<Long> matchLowPowerStandbyPorts(
             @NonNull List<LowPowerStandbyPortDescription> ports, int protocol, int matcher) {
         final ArraySet<Long> matchingPorts = new ArraySet<>();
@@ -4613,8 +4695,13 @@ public class ApfFilter {
             mLowPowerStandbyPortsSubscriber.unsubscribe();
         }
         mIsApfShutdown = true;
-        if (SdkLevel.isAtLeastV() && mApfMdnsOffloadEngine != null) {
-            mApfMdnsOffloadEngine.unregisterOffloadEngine();
+        if (SdkLevel.isAtLeastV()) {
+            if (mApfMdnsReplyOffloadEngine != null) {
+                mApfMdnsReplyOffloadEngine.unregisterOffloadEngine();
+            }
+            if (mApfMdnsFilterOffloadEngine != null) {
+                mApfMdnsFilterOffloadEngine.unregisterOffloadEngine();
+            }
         }
 
         if (mMulticastReportMonitor != null) {
@@ -4780,26 +4867,34 @@ public class ApfFilter {
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableMdns4Offload() {
-        return enableOffloadEngineRegistration() && mIPv4Address != null
+        return enableOffloadEngineRegistration()
+                && mHandleMdnsOffload
+                && mIPv4Address != null
                 && !mOffloadRules.isEmpty();
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableMdns6Offload() {
-        return enableOffloadEngineRegistration() && mIPv6LinkLocalAddress != null
+        return enableOffloadEngineRegistration()
+                && mHandleMdnsOffload
+                && mIPv6LinkLocalAddress != null
                 && !mOffloadRules.isEmpty();
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableMdns4Filter() {
-        return enableOffloadEngineRegistration() && mIPv4Address != null
-            && !mFilterRules.isEmpty();
+        return enableOffloadEngineRegistration()
+                && mHandleMdnsReplyFilter
+                && mIPv4Address != null
+                && !mFilterRules.isEmpty();
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
     private boolean enableMdns6Filter() {
-        return enableOffloadEngineRegistration() && mIPv6LinkLocalAddress != null
-            && !mFilterRules.isEmpty();
+        return enableOffloadEngineRegistration()
+                && mHandleMdnsReplyFilter
+                && mIPv6LinkLocalAddress != null
+                && !mFilterRules.isEmpty();
     }
 
     @ChecksSdkIntAtLeast(api = 35 /* Build.VERSION_CODES.VanillaIceCream */)
@@ -4997,7 +5092,7 @@ public class ApfFilter {
                 mLastInstalledProgram.length, filterAgeSeconds,
                 mLastInstalledProgramMinLifetime));
         pw.println();
-        pw.println("Mdns filters:");
+        pw.println("Mdns query filters:");
         pw.increaseIndent();
         if (mNumOfMdnsRuleToOffload == -1) {
             pw.println("pass all mDNS packet");
@@ -5011,6 +5106,17 @@ public class ApfFilter {
                             rule.mFullServiceName,
                             rule.mOffloadPayload == null ? 0 : rule.mOffloadPayload.length));
                 }
+            }
+        }
+        pw.decreaseIndent();
+        pw.println();
+        pw.println("Mdns reply allowed:");
+        pw.increaseIndent();
+        if (isIgnoreMdnsReplyFilter()) {
+            pw.println("pass all mDNS reply packets");
+        } else {
+            for (MdnsOffloadRule rule: mFilterRules) {
+                pw.println(String.format("allowed service: %s", rule.mFullServiceName));
             }
         }
         pw.decreaseIndent();
