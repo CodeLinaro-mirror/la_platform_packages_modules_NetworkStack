@@ -25,7 +25,7 @@ package {
 java_defaults {
     name: "NetworkStackReleaseTargetSdk",
     min_sdk_version: "31",
-    target_sdk_version: "36",
+    target_sdk_version: "37",
 }
 
 java_defaults {
@@ -139,7 +139,7 @@ java_library {
         "modules-utils-build",
         "net-utils-framework-common",
         "networkstack-client",
-        "net-utils-device-common",
+        "net-utils-connectivity-apks",
     ],
     // If this library is ever used outside of tests, it should not use "Dhcp*Packet", and specify
     // its contents explicitly.
@@ -220,6 +220,7 @@ java_defaults {
 filegroup {
     name: "privapp_whitelist_com.android.networkstack",
     srcs: ["com.android.networkstack.xml"],
+    visibility: ["//visibility:public"],
 }
 
 // Updatable network stack for finalized API
